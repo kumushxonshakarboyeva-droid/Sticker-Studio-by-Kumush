@@ -276,6 +276,7 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
             f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
             f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
         )
+        
         if media_type == 'video':
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.webm"
             ffmpeg_cmd = [
@@ -283,12 +284,14 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
                 "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
                 "-auto-alt-ref", "0", "-b:v", "128k" if target_size==100 else "256k", output_path
             ]
+            st_format = "video"
         else:
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
             ffmpeg_cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", vf.replace("format=yuva420p,", ""), "-frames:v", "1", output_path
             ]
+            st_format = "static"
 
         subprocess.run(ffmpeg_cmd, check=True)
         bot_username = (await context.bot.get_me()).username
@@ -305,7 +308,8 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
                     name=pack_name,
                     title=pack_title,
                     stickers=[input_sticker],
-                    sticker_type=pack_type
+                    sticker_type=pack_type,
+                    sticker_format=st_format
                 )
 
         save_pack_record(user_id, pack_name, pack_title, pack_type)
