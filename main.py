@@ -7,12 +7,9 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 PACKS_FILE = "user_packs.json"
-
 user_sessions = {}
 
-
-# ---------- Persistence: track packs per user (names change per session) ----------
-
+# ---------- Persistence: track packs per user ----------
 def load_packs():
     if os.path.exists(PACKS_FILE):
         try:
@@ -22,20 +19,17 @@ def load_packs():
             return {}
     return {}
 
-
-def save_pack_record(user_id: int, name: str, title: str):
+def save_pack_record(user_id: int, name: str, title: str, pack_type: str = "regular"):
     data = load_packs()
     key = str(user_id)
     packs = data.setdefault(key, [])
     if not any(p["name"] == name for p in packs):
-        packs.append({"name": name, "title": title})
+        packs.append({"name": name, "title": title, "type": pack_type})
     data[key] = packs
     with open(PACKS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
 # ---------- Bot setup ----------
-
 async def post_init(application):
     commands = [
         BotCommand("start", "Botni qayta ishga tushirish"),
@@ -44,73 +38,69 @@ async def post_init(application):
     ]
     await application.bot.set_my_commands(commands)
 
-
 def main_menu_markup():
     menu_buttons = [
-        [KeyboardButton("âž• Yangi to'plam yaratish")],
-        [KeyboardButton("ðŸ“Œ Joriy to'plamga qo'shish")],
-        [KeyboardButton("ðŸ“¦ Mening to'plamlarim"), KeyboardButton("â“ Yordam")]
+        [KeyboardButton("➕ Yangi to'plam yaratish")],
+        [KeyboardButton("📌 Joriy to'plamga qo'shish")],
+        [KeyboardButton("📦 Mening to'plamlarim"), KeyboardButton("❓ Yordam")]
     ]
     return ReplyKeyboardMarkup(menu_buttons, resize_keyboard=True)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cleanup_session(update.effective_user.id)
     await update.message.reply_text(
-        "Salom! Men video yoki rasmingizni shaffof fonli stikerga aylantirib, Telegram stiker to'plamingizga qo'shib beraman!\n\n"
-        "Boshlash uchun \"âž• Yangi to'plam yaratish\" yoki mavjud to'plamga qo'shish uchun \"ðŸ“Œ Joriy to'plamga qo'shish\" tugmasini bosing.",
+        "Salom! Men rasmlar va videolarni shaffof fonli Stiker (512x512) yoki Custom Emoji (100x100) formatiga o'tkazib, Telegram to'plamingizga qo'shib beraman!\n\n"
+        "Boshlash uchun \"➕ Yangi to'plam yaratish\" tugmasini bosing.",
         reply_markup=main_menu_markup()
     )
 
-
-def sanitize_pack_name(raw_text: str, user_id: int, bot_username: str) -> str:
-    """Build a Telegram-compliant short pack name: letters/digits/underscores,
-    must start with a letter, max 64 chars, ends with _by_<bot_username>."""
+def sanitize_pack_name(raw_text: str, user_id: int, bot_username: str, is_emoji: bool = False) -> str:
     suffix = f"_by_{bot_username}"
+    prefix = "e_" if is_emoji else ""
     base = re.sub(r'[^A-Za-z0-9]+', '_', raw_text).strip('_')
     if not base:
         base = "pack"
     if not base[0].isalpha():
         base = "p" + base
-    core = f"{base}_{user_id}"
+    core = f"{prefix}{base}_{user_id}"
     max_core_len = 64 - len(suffix)
     core = core[:max_core_len]
     return f"{core}{suffix}"
 
-
 def build_pack_title(raw_text: str, bot_username: str) -> str:
     title = f"{raw_text.strip()} | @{bot_username}"
     return title[:64]
-
 
 async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = load_packs()
     packs = data.get(str(user_id), [])
     if not packs:
-        await update.message.reply_text("Sizda hali stiker to'plamlari yo'q. \"âž• Yangi to'plam yaratish\" tugmasini bosib boshlang.")
+        await update.message.reply_text("Sizda hali to'plamlar yo'q. \"➕ Yangi to'plam yaratish\" tugmasini bosing.")
         return
-    lines = ["ðŸ“¦ Sizning to'plamlaringiz:\n"]
+    lines = ["📦 Sizning to'plamlaringiz:\n"]
     for p in packs:
-        lines.append(f"â€¢ {p['title']}\nhttps://t.me/addstickers/{p['name']}\n")
+        ptype = "✨ Emoji" if p.get("type") == "custom_emoji" else "🖼 Stiker"
+        lines.append(f"• {p['title']} ({ptype})\nhttps://t.me/addstickers/{p['name']}\n")
     await update.message.reply_text("\n".join(lines))
 
-
-# ---------- Text handler: drives step 1 (name) and step 3 (emoji) ----------
-
+# ---------- Text handler ----------
 async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.message.from_user.id
     session = user_sessions.get(user_id)
 
     if session and session.get('step') == 'WAITING_NAME':
-        bot_username = (await context.bot.get_me()).username
-        session['pack_name'] = sanitize_pack_name(text, user_id, bot_username)
-        session['pack_title'] = build_pack_title(text, bot_username)
-        session['step'] = 'WAITING_FILE'
+        session['raw_title'] = text
+        session['step'] = 'WAITING_TYPE'
+        
+        keyboard = [
+            [InlineKeyboardButton("🖼 Oddiy Stiker (512x512)", callback_data="type=regular")],
+            [InlineKeyboardButton("✨ Custom Emoji (100x100)", callback_data="type=custom_emoji")]
+        ]
         await update.message.reply_text(
-            f"To'plam nomi: {session['pack_title']}\n\n"
-            "2ï¸âƒ£ Endi menga rasm yoki video yuboring."
+            f"To'plam nomi: {text}\n\n2️⃣ To'plam turini tanlang:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -121,61 +111,46 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         session['emoji_list'] = emojis[:20]
         session['step'] = 'WAITING_COLOR'
         keyboard = [
-            [InlineKeyboardButton("ðŸª„ Avto-aniqlash", callback_data="color=auto")],
-            [InlineKeyboardButton("ðŸŸ¢ Yashil", callback_data="color=0x00FF00"),
-             InlineKeyboardButton("âšª Oq", callback_data="color=0xFFFFFF"),
-             InlineKeyboardButton("ðŸ–¤ Qora", callback_data="color=0x000000")]
+            [InlineKeyboardButton("🪄 Avto-aniqlash", callback_data="color=auto")],
+            [InlineKeyboardButton("🟢 Yashil", callback_data="color=0x00FF00"), InlineKeyboardButton("⚪ Oq", callback_data="color=0xFFFFFF"), InlineKeyboardButton("🖤 Qora", callback_data="color=0x000000")]
         ]
-        await update.message.reply_text("4ï¸âƒ£ Orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("4️⃣ Orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    if text == "âž• Yangi to'plam yaratish":
+    if text == "➕ Yangi to'plam yaratish":
         user_sessions[user_id] = {'step': 'WAITING_NAME'}
-        await update.message.reply_text("1ï¸âƒ£ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
-    elif text == "ðŸ“Œ Joriy to'plamga qo'shish":
+        await update.message.reply_text("1️⃣ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
+    elif text == "📌 Joriy to'plamga qo'shish":
         await start_add_to_existing_pack(update, context)
-    elif text == "ðŸ“¦ Mening to'plamlarim":
+    elif text == "📦 Mening to'plamlarim":
         await mypacks(update, context)
-    elif text == "â“ Yordam":
+    elif text == "❓ Yordam":
         await update.message.reply_text(
-            "Yangi to'plam:\n"
-            "1) \"âž• Yangi to'plam yaratish\" tugmasini bosing\n"
-            "2) To'plam nomini yozing\n"
+            "Yangi to'plam yaratish:\n"
+            "1) \"➕ Yangi to'plam yaratish\" tugmasini bosing\n"
+            "2) Nom kiriting va turni tanlang (512x512 Stiker yoki 100x100 Emoji)\n"
             "3) Rasm yoki video yuboring\n"
-            "4) Mos emoji(lar)ni yuboring\n"
-            "5) Fon rangini tanlang va preview'ni tasdiqlang\n\n"
-            "Mavjud to'plamga stiker qo'shish:\n"
-            "\"ðŸ“Œ Joriy to'plamga qo'shish\" tugmasini bosib, ro'yxatdan to'plamni tanlang, so'ng 2-5 qadamlarni takrorlang."
+            "4) Mos emoji va fon rangini tanlang"
         )
-
 
 async def start_add_to_existing_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = load_packs()
     packs = data.get(str(user_id), [])
     if not packs:
-        await update.message.reply_text(
-            "Sizda hali to'plamlar yo'q. Avval \"âž• Yangi to'plam yaratish\" tugmasini bosing."
-        )
+        await update.message.reply_text("Sizda hali to'plamlar yo'q. Avval \"➕ Yangi to'plam yaratish\" tugmasini bosing.")
         return
-    keyboard = [[InlineKeyboardButton(p['title'], callback_data=f"addto={p['name']}")] for p in packs]
-    await update.message.reply_text(
-        "Qaysi to'plamga stiker qo'shmoqchisiz?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    keyboard = [[InlineKeyboardButton(f"{p['title']} ({'✨ Emoji' if p.get('type')=='custom_emoji' else '🖼 Stiker'})", callback_data=f"addto={p['name']}")] for p in packs]
+    await update.message.reply_text("Qaysi to'plamga qo'shmoqchisiz?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-
-# ---------- Media handler: drives step 2 (upload) ----------
-
+# ---------- Media handler ----------
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user_id = message.from_user.id
     session = user_sessions.get(user_id)
 
     if not session or session.get('step') != 'WAITING_FILE':
-        await message.reply_text(
-            "Iltimos, avval \"âž• Yangi stiker yaratish\" tugmasini bosib, to'plam nomini kiriting."
-        )
+        await message.reply_text("Iltimos, avval \"➕ Yangi to'plam yaratish\" tugmasini bosib, nom kiriting.")
         return
 
     video = message.video or message.animation
@@ -197,31 +172,19 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unique_id = str(uuid.uuid4())[:8]
         input_path = f"input_{user_id}_{unique_id}.{ext}"
         await file.download_to_drive(input_path)
-
         session['input_path'] = input_path
         session['media_type'] = media_type
         session['step'] = 'WAITING_EMOJI'
-        await message.reply_text(
-            "3ï¸âƒ£ Ushbu stiker uchun mos keladigan emoji(lar)ni yuboring (masalan: ðŸ˜‚ yoki â¤ï¸):"
-        )
+        await update.message.reply_text("3️⃣ Ushbu stiker uchun mos keladigan emoji(lar)ni yuboring (masalan: 😂 yoki ❤️):")
     except Exception as e:
         logger.error(f"Media download error: {e}")
-        await message.reply_text(f"âŒ Faylni yuklab olishda xatolik: {e}")
-
+        await message.reply_text(f"❌ Faylni yuklab olishda xatolik: {e}")
 
 async def detect_corner_color(input_path):
-    """Sample all 4 corners and pick the most common color."""
     try:
         cmd = [
-            "ffmpeg", "-i", input_path,
-            "-vf", (
-                "split=4[a][b][c][d];"
-                "[a]crop=1:1:0:0[tl];"
-                "[b]crop=1:1:iw-1:0[tr];"
-                "[c]crop=1:1:0:ih-1[bl];"
-                "[d]crop=1:1:iw-1:ih-1[br];"
-                "[tl][tr][bl][br]hstack=4,format=rgb24"
-            ),
+            "ffmpeg", "-i", input_path, "-vf",
+            "split=4[a][b][c][d];[a]crop=1:1:0:0[tl];[b]crop=1:1:iw-1:0[tr];[c]crop=1:1:0:ih-1[bl];[d]crop=1:1:iw-1:ih-1[br];[tl][tr][bl][br]hstack=4,format=rgb24",
             "-vframes", "1", "-f", "rawvideo", "pipe:1"
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -236,9 +199,7 @@ async def detect_corner_color(input_path):
         logger.warning(f"Corner detection failed: {e}")
     return "0x00FF00"
 
-
-# ---------- Callback buttons: background color choice + preview confirm/cancel ----------
-
+# ---------- Callback buttons ----------
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -246,44 +207,67 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     session = user_sessions.get(user_id)
 
-    if data.startswith("addto="):
+    if data.startswith("type="):
+        pack_type = data.split("=", 1)[1]
+        is_emoji = (pack_type == "custom_emoji")
+        bot_username = (await context.bot.get_me()).username
+        raw_title = session['raw_title']
+        
+        session['pack_type'] = pack_type
+        session['pack_name'] = sanitize_pack_name(raw_title, user_id, bot_username, is_emoji=is_emoji)
+        session['pack_title'] = build_pack_title(raw_title, bot_username)
+        session['step'] = 'WAITING_FILE'
+
+        size_text = "100x100 Emoji" if is_emoji else "512x512 Stiker"
+        await query.edit_message_text(
+            f"To'plam nomi: {session['pack_title']}\n"
+            f"Turi: {size_text}\n\n"
+            f"3️⃣ Endi menga rasm yoki video yuboring."
+        )
+
+    elif data.startswith("addto="):
         pack_name = data.split("=", 1)[1]
         packs = load_packs().get(str(user_id), [])
         pack = next((p for p in packs if p['name'] == pack_name), None)
         if not pack:
-            await query.edit_message_text("âŒ To'plam topilmadi.")
+            await query.edit_message_text("❌ To'plam topilmadi.")
             return
         user_sessions[user_id] = {
             'step': 'WAITING_FILE',
             'pack_name': pack['name'],
             'pack_title': pack['title'],
+            'pack_type': pack.get('type', 'regular')
         }
+        size_text = "100x100 Emoji" if pack.get('type') == 'custom_emoji' else "512x512 Stiker"
         await query.edit_message_text(
-            f"To'plam: {pack['title']}\n\n"
-            "2ï¸âƒ£ Endi menga rasm yoki video yuboring."
+            f"To'plam: {pack['title']} ({size_text})\n\n2️⃣ Endi menga rasm yoki video yuboring."
         )
+
     elif data.startswith("color="):
         if not session or not os.path.exists(session.get('input_path', '')):
-            await query.edit_message_text("âŒ Fayl topilmadi. Qaytadan boshlang.")
+            await query.edit_message_text("❌ Fayl topilmadi. Qaytadan boshlang.")
             return
         session['color_choice'] = data.split("=", 1)[1]
         await process_and_preview_sticker(query, context, user_id)
+
     elif data == "confirm_add":
         await add_to_sticker_pack(query, context, user_id)
+
     elif data == "cancel_add":
-        await query.edit_message_caption("ðŸš« Bekor qilindi.") if query.message.caption else await query.edit_message_text("ðŸš« Bekor qilindi.")
+        await query.edit_message_caption("🚫 Bekor qilindi.") if query.message.caption else await query.edit_message_text("🚫 Bekor qilindi.")
         cleanup_session(user_id)
 
-
-# ---------- Step 4: build a preview sticker (not yet added to the pack) ----------
-
+# ---------- Preview & Process ----------
 async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
     input_path = session['input_path']
     media_type = session['media_type']
+    pack_type = session.get('pack_type', 'regular')
+    
+    # O'lchamni aniqlash
+    target_size = 100 if pack_type == 'custom_emoji' else 512
 
-    await query.edit_message_text("â³ Ishlanmoqda...")
-
+    await query.edit_message_text("⏳ Ishlanmoqda...")
     try:
         color_code = session['color_choice']
         if color_code == "auto":
@@ -292,31 +276,22 @@ async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE,
         vf = (
             f"colorkey={color_code}:{tol}:0.1,"
             f"format=yuva420p,"
-            f"scale=512:512:force_original_aspect_ratio=decrease,"
-            f"pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0"
+            f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
+            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
         )
-
         if media_type == 'video':
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.webm"
             ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-ss", "0", "-t", "3", "-i", input_path,
-                "-vf", vf,
-                "-c:v", "libvpx-vp9",
-                "-pix_fmt", "yuva420p",
-                "-auto-alt-ref", "0",
-                "-b:v", "256k",
-                output_path
+                "ffmpeg", "-y", "-ss", "0", "-t", "3", "-i", input_path,
+                "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                "-auto-alt-ref", "0", "-b:v", "128k" if target_size==100 else "256k", output_path
             ]
             sticker_format = 'video'
         else:
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
             ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", input_path,
-                "-vf", vf.replace("format=yuva420p,", ""),
-                "-frames:v", "1",
-                output_path
+                "ffmpeg", "-y", "-i", input_path,
+                "-vf", vf.replace("format=yuva420p,", ""), "-frames:v", "1", output_path
             ]
             sticker_format = 'static'
 
@@ -324,23 +299,22 @@ async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE,
         session['output_path'] = output_path
         session['sticker_format'] = sticker_format
 
-        keyboard = [[InlineKeyboardButton("âœ… Qo'shilsin", callback_data="confirm_add"),
-                     InlineKeyboardButton("âŒ Bekor qilish", callback_data="cancel_add")]]
+        keyboard = [[InlineKeyboardButton("✅ Qo'shilsin", callback_data="confirm_add"), InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_add")]]
         with open(output_path, 'rb') as f:
             await context.bot.send_document(
-                chat_id=user_id, document=f, filename="preview" + os.path.splitext(output_path)[1],
-                caption="ðŸ‘ Prewyu ko'rinishi. Fon o'chirilganiga ishonch hosil qiling. To'plamga qo'shaylikmi?",
+                chat_id=user_id,
+                document=f,
+                filename="preview" + os.path.splitext(output_path)[1],
+                caption=f"👍 Prewyu ko'rinishi ({target_size}x{target_size}). To'plamga qo'shaylikmi?",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
     except Exception as e:
         logger.error(f"Sticker preview error: {e}")
-        await query.edit_message_text(f"âŒ Xatolik: {e}")
+        await query.edit_message_text(f"❌ Xatolik: {e}")
         cleanup_session(user_id)
 
-
-# ---------- Step 5: user confirmed -- attach to the pack for real ----------
-
+# ---------- Add to Pack ----------
 async def add_to_sticker_pack(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
     output_path = session['output_path']
@@ -348,6 +322,7 @@ async def add_to_sticker_pack(query, context: ContextTypes.DEFAULT_TYPE, user_id
     emoji_list = session['emoji_list']
     pack_name = session['pack_name']
     pack_title = session['pack_title']
+    pack_type = session.get('pack_type', 'regular')
 
     try:
         bot_username = (await context.bot.get_me()).username
@@ -359,23 +334,21 @@ async def add_to_sticker_pack(query, context: ContextTypes.DEFAULT_TYPE, user_id
                 sticker_file.seek(0)
                 input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list, format=sticker_format)
                 await context.bot.create_new_sticker_set(
-                    user_id=user_id, name=pack_name, title=pack_title,
-                    stickers=[input_sticker], sticker_type='regular'
+                    user_id=user_id,
+                    name=pack_name,
+                    title=pack_title,
+                    stickers=[input_sticker],
+                    sticker_type=pack_type
                 )
-
-        save_pack_record(user_id, pack_name, pack_title)
-
+        save_pack_record(user_id, pack_name, pack_title, pack_type)
         await query.edit_message_caption(
-            caption=f"âœ… Tayyor! Stiker to'plamga qo'shildi.\n"
-                    f"ðŸ”— https://t.me/addstickers/{pack_name}\n"
-                    f"ðŸ‘¤ @{bot_username}"
+            caption=f"✅ Tayyor! To'plamga qo'shildi.\n🔗 https://t.me/addstickers/{pack_name}\n👤 @{bot_username}"
         )
     except Exception as e:
         logger.error(f"Sticker creation error: {e}")
-        await query.edit_message_caption(caption=f"âŒ Xatolik: {e}")
+        await query.edit_message_caption(caption=f"❌ Xatolik: {e}")
     finally:
         cleanup_session(user_id)
-
 
 def cleanup_session(user_id):
     if user_id in user_sessions:
@@ -385,7 +358,6 @@ def cleanup_session(user_id):
         if s.get('output_path') and os.path.exists(s['output_path']):
             os.remove(s['output_path'])
         del user_sessions[user_id]
-
 
 if __name__ == '__main__':
     app = (
@@ -403,4 +375,4 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message_text))
-    app.run_polling()os
+    app.run_polling()
