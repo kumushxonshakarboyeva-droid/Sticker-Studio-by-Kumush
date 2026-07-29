@@ -248,25 +248,23 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Fayl topilmadi. Qaytadan boshlang.")
             return
         session['color_choice'] = data.split("=", 1)[1]
-        await process_and_preview_sticker(query, context, user_id)
+        await process_and_add_directly(query, context, user_id)
 
-    elif data == "confirm_add":
-        await add_to_sticker_pack(query, context, user_id)
-
-    elif data == "cancel_add":
-        await query.edit_message_caption("🚫 Bekor qilindi.") if query.message.caption else await query.edit_message_text("🚫 Bekor qilindi.")
-        cleanup_session(user_id)
-
-# ---------- Preview & Process ----------
-async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+# ---------- Direct Process & Add ----------
+async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
     input_path = session['input_path']
     media_type = session['media_type']
     pack_type = session.get('pack_type', 'regular')
+    emoji_list = session['emoji_list']
+    pack_name = session['pack_name']
+    pack_title = session['pack_title']
     
     target_size = 100 if pack_type == 'custom_emoji' else 512
 
-    await query.edit_message_text("⏳ Ishlanmoqda...")
+    await query.edit_message_text("⏳ Stiker ishlanmoqda va to'plamga qo'shilmoqda...")
+    
+    output_path = None
     try:
         color_code = session['color_choice']
         if color_code == "auto":
@@ -285,53 +283,23 @@ async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE,
                 "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
                 "-auto-alt-ref", "0", "-b:v", "128k" if target_size==100 else "256k", output_path
             ]
-            sticker_format = 'video'
         else:
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
             ffmpeg_cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", vf.replace("format=yuva420p,", ""), "-frames:v", "1", output_path
             ]
-            sticker_format = 'static'
 
         subprocess.run(ffmpeg_cmd, check=True)
-        session['output_path'] = output_path
-        session['sticker_format'] = sticker_format
-
-        keyboard = [[InlineKeyboardButton("✅ Qo'shilsin", callback_data="confirm_add"), InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_add")]]
-        with open(output_path, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=user_id,
-                document=f,
-                filename="preview" + os.path.splitext(output_path)[1],
-                caption=f"👍 Prewyu ko'rinishi ({target_size}x{target_size}). To'plamga qo'shaylikmi?",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
-    except Exception as e:
-        logger.error(f"Sticker preview error: {e}")
-        await query.edit_message_text(f"❌ Xatolik: {e}")
-        cleanup_session(user_id)
-
-# ---------- Add to Pack ----------
-async def add_to_sticker_pack(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    session = user_sessions.get(user_id)
-    output_path = session['output_path']
-    sticker_format = session['sticker_format']
-    emoji_list = session['emoji_list']
-    pack_name = session['pack_name']
-    pack_title = session['pack_title']
-    pack_type = session.get('pack_type', 'regular')
-
-    try:
         bot_username = (await context.bot.get_me()).username
+
         with open(output_path, 'rb') as sticker_file:
-            input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list, format=sticker_format)
+            input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list)
             try:
                 await context.bot.add_sticker_to_set(user_id=user_id, name=pack_name, sticker=input_sticker)
             except Exception:
                 sticker_file.seek(0)
-                input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list, format=sticker_format)
+                input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list)
                 await context.bot.create_new_sticker_set(
                     user_id=user_id,
                     name=pack_name,
@@ -339,14 +307,19 @@ async def add_to_sticker_pack(query, context: ContextTypes.DEFAULT_TYPE, user_id
                     stickers=[input_sticker],
                     sticker_type=pack_type
                 )
+
         save_pack_record(user_id, pack_name, pack_title, pack_type)
-        await query.edit_message_caption(
-            caption=f"✅ Tayyor! To'plamga qo'shildi.\n🔗 https://t.me/addstickers/{pack_name}\n👤 @{bot_username}"
+        await query.edit_message_text(
+            f"✅ Muvaffaqiyatli qo'shildi!\n\n"
+            f"🔗 To'plam havolasi: https://t.me/addstickers/{pack_name}\n"
+            f"👤 Yaratuvchi: @{bot_username}"
         )
     except Exception as e:
-        logger.error(f"Sticker creation error: {e}")
-        await query.edit_message_caption(caption=f"❌ Xatolik: {e}")
+        logger.error(f"Sticker process error: {e}")
+        await query.edit_message_text(f"❌ Xatolik yuz berdi: {e}")
     finally:
+        if output_path and os.path.exists(output_path):
+            os.remove(output_path)
         cleanup_session(user_id)
 
 def cleanup_session(user_id):
@@ -354,8 +327,6 @@ def cleanup_session(user_id):
         s = user_sessions[user_id]
         if s.get('input_path') and os.path.exists(s['input_path']):
             os.remove(s['input_path'])
-        if s.get('output_path') and os.path.exists(s['output_path']):
-            os.remove(s['output_path'])
         del user_sessions[user_id]
 
 async def main_async():
