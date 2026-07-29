@@ -1,4 +1,4 @@
-import os, re, json, subprocess, uuid, logging
+import os, re, json, subprocess, uuid, logging, asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputSticker, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -264,7 +264,6 @@ async def process_and_preview_sticker(query, context: ContextTypes.DEFAULT_TYPE,
     media_type = session['media_type']
     pack_type = session.get('pack_type', 'regular')
     
-    # O'lchamni aniqlash
     target_size = 100 if pack_type == 'custom_emoji' else 512
 
     await query.edit_message_text("⏳ Ishlanmoqda...")
@@ -359,7 +358,7 @@ def cleanup_session(user_id):
             os.remove(s['output_path'])
         del user_sessions[user_id]
 
-if __name__ == '__main__':
+async def main_async():
     app = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -375,4 +374,14 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message_text))
-    app.run_polling()
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        await asyncio.Event().wait()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main_async())
+    except (KeyboardInterrupt, SystemExit):
+        pass
