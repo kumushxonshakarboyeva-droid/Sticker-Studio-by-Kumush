@@ -509,3 +509,19 @@ if __name__ == '__main__':
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
         pass
+from rembg import remove
+from PIL import Image
+import io
+
+def remove_bg_ai(input_path, output_path):
+    # Rasmni o'qish va AI orqali fonini kesish
+    with open(input_path, 'rb') as f:
+        img_data = f.read()
+    
+    output_data = remove(img_data)
+    
+    # Oq quyonlar yoki ob'ektlar ziyon ko'rmaydi
+    img = Image.open(io.BytesIO(output_data)).convert("RGBA")
+    img.thumbnail((512, 512))
+    img.save(output_path, "PNG")
+    return output_path
