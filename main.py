@@ -411,10 +411,10 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
         color_code = session['color_choice']
         if color_code == "auto":
             color_code = await detect_corner_color(input_path)
-        tol = "0.3"
+        tol = "0.1"
         
         vf = (
-            f"colorkey={color_code}:{tol}:0.1,"
+            f"colorkey={color_code}:{tol}:0.05,"
             f"format=yuva420p,"
             f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
             f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
@@ -493,8 +493,7 @@ async def main_async():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", show_tariffs))
     app.add_handler(CommandHandler("mypacks", mypacks))
-    app.add_handler(CommandHandler("newpack", lambda u, c: user_sessions.update({u.effective_user.id: {'step': 'WAITING_NAME'}}) or u.message.reply_text("1️⃣ Yangi to'plam uchun nom kiriting (masalan: Mening Stikerlarim):")))
-    app.add_handler(CommandHandler("addpack", start_add_to_existing_pack))
+    app.add_handler(CommandHandler("newpack", start_new_pack))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
