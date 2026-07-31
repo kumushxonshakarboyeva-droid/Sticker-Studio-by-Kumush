@@ -80,10 +80,11 @@ def is_vip_active(user_info: dict) -> bool:
 async def post_init(application):
     commands = [
         BotCommand("start", "Botni qayta ishga tushirish"),
-        BotCommand("buy", "Stars orqali VIP/Stiker sotib olish"),
-        BotCommand("mypacks", "Mening stiker to'plamlarim"),
+        BotCommand("newpack", "➕ Yangi to'plam yaratish"),
+        BotCommand("addpack", "📌 Joriy to'plamga qo'shish"),
+        BotCommand("mypacks", "📦 Mening stiker to'plamlarim"),
         BotCommand("help", "Yo'riqnoma va yordam")
-    ]
+    ]  
     await application.bot.set_my_commands(commands)
 
 def main_menu_markup():
@@ -492,6 +493,8 @@ async def main_async():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", show_tariffs))
     app.add_handler(CommandHandler("mypacks", mypacks))
+    app.add_handler(CommandHandler("newpack", lambda u, c: user_sessions.update({u.effective_user.id: {'step': 'WAITING_NAME'}}) or u.message.reply_text("1️⃣ Yangi to'plam uchun nom kiriting (masalan: Mening Stikerlarim):")))
+    app.add_handler(CommandHandler("addpack", start_add_to_existing_pack))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
