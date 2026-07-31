@@ -99,32 +99,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Salom! @Vid2Sticker_bot ga xush kelibsiz! 🎬\n\n"
         "Men sizga video va rasmlaringizdan orqa fonsiz animatsion stiker hamda custom emojilar tayyorlab beraman.\n\n"
-        "🎁 **Dastlabki 3 ta stikeringiz mutlaqo bepul!**\n\n"
+        "🎁 Dastlabki 3 ta stikeringiz mutlaqo bepul!\n\n"
         "Boshlash uchun \"➕ Yangi to'plam yaratish\" tugmasini bosing.",
-        reply_markup=main_menu_markup(),
-        parse_mode="Markdown"
+        reply_markup=main_menu_markup()
     )
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     u_data = get_user_data(user_id)
     
-    vip_status = "👑 **VIP Obunangiz faol!**" if is_vip_active(u_data) else "❌ VIP obuna yo'q"
+    vip_status = "👑 VIP Obunangiz faol!" if is_vip_active(u_data) else "❌ VIP obuna yo'q"
     credits = u_data.get("paid_credits", 0)
     free_used = u_data.get("free_count", 0)
     free_left = max(0, 3 - free_used)
 
     text = (
-        f"📊 **Sizning balansingiz:**\n"
+        f"📊 Sizning balansingiz:\n"
         f"• Bepul limit: {free_left}/3 ta\n"
         f"• Sotib olingan stikerlar: {credits} ta\n"
         f"• Holat: {vip_status}\n\n"
-        "⭐ **Telegram Stars orqali tariflar:**\n"
+        "⭐ Telegram Stars orqali tariflar:\n"
         "• 1 ta stiker — 10 Stars\n"
-        "• 10 talik paket — 50 Stars *(50% chegirma)*\n"
+        "• 10 talik paket — 50 Stars (50% chegirma)\n"
         "• 1 haftalik VIP — 100 Stars\n"
         "• 1 oylik VIP — 200 Stars\n"
-        "• 1 yillik VIP — 1000 Stars *(Eng hamyonbop!)*\n\n"
+        "• 1 yillik VIP — 1000 Stars (Eng hamyonbop!)\n\n"
         "Sotib olmoqchi bo'lgan tarifingizni tanlang:"
     )
 
@@ -136,9 +135,9 @@ async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     if update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def sanitize_pack_name(raw_text: str, user_id: int, bot_username: str, is_emoji: bool = False) -> str:
     suffix = f"_by_{bot_username}"
@@ -164,11 +163,11 @@ async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not packs:
         await update.message.reply_text("Sizda hali to'plamlar yo'q. \"➕ Yangi to'plam yaratish\" tugmasini bosing.")
         return
-    lines = ["📦 **Sizning to'plamlaringiz:**\n"]
+    lines = ["📦 Sizning to'plamlaringiz:\n"]
     for p in packs:
         ptype = "✨ Emoji" if p.get("type") == "custom_emoji" else "🖼 Stiker"
         lines.append(f"• {p['title']} ({ptype})\nhttps://t.me/addstickers/{p['name']}\n")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 # ---------- Text & Media Handlers ----------
 async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,9 +397,8 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
 
     if not can_proceed:
         await query.edit_message_text(
-            "⚠️ **Sizning bepul 3 ta stiker yaratish limitigingiz tugadi!**\n\n"
-            "Davom etish uchun VIP obuna yoki stiker paketi sotib oling: /buy",
-            parse_mode="Markdown"
+            "⚠️ Sizning bepul 3 ta stiker yaratish limitigingiz tugadi!\n\n"
+            "Davom etish uchun VIP obuna yoki stiker paketi sotib oling: /buy"
         )
         cleanup_session(user_id)
         return
@@ -477,7 +475,7 @@ def cleanup_session(user_id):
     if user_id in user_sessions:
         s = user_sessions[user_id]
         if s.get('input_path') and os.path.exists(s['input_path']):
-            os.remove(s['input_path'])
+            os.remove(s['input_path']):
         del user_sessions[user_id]
 
 async def main_async():
