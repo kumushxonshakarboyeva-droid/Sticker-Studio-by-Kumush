@@ -82,9 +82,10 @@ async def post_init(application):
         BotCommand("start", "Botni qayta ishga tushirish"),
         BotCommand("newpack", "➕ Yangi to'plam yaratish"),
         BotCommand("addpack", "📌 Joriy to'plamga qo'shish"),
-        BotCommand("mypacks", "📦 Mening stiker to'plamlarim"),
+        BotCommand("buy", "Stars orqali VIP/Stiker sotib olish"),
+        BotCommand("mypacks", "Mening stiker to'plamlarim"),
         BotCommand("help", "Yo'riqnoma va yordam")
-    ]  
+    ]
     await application.bot.set_my_commands(commands)
 
 def main_menu_markup():
@@ -104,6 +105,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Boshlash uchun \"➕ Yangi to'plam yaratish\" tugmasini bosing.",
         reply_markup=main_menu_markup()
     )
+
+async def start_new_pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_sessions[user_id] = {'step': 'WAITING_NAME'}
+    await update.message.reply_text("1️⃣ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -199,10 +205,9 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("4️⃣ Orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    if text == "➕ Yangi to'plam yaratish":
-        user_sessions[user_id] = {'step': 'WAITING_NAME'}
-        await update.message.reply_text("1️⃣ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
-    elif text == "📌 Joriy to'plamga qo'shish":
+    if text in ["➕ Yangi to'plam yaratish", "/newpack"]:
+        await start_new_pack_cmd(update, context)
+    elif text in ["📌 Joriy to'plamga qo'shish", "/addpack"]:
         await start_add_to_existing_pack(update, context)
     elif text in ["💎 VIP va Tariflar", "/buy"]:
         await show_tariffs(update, context)
@@ -411,7 +416,7 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
         color_code = session['color_choice']
         if color_code == "auto":
             color_code = await detect_corner_color(input_path)
-        tol = "0.1"
+        tol = "0.08"
         
         vf = (
             f"colorkey={color_code}:{tol}:0.05,"
@@ -476,7 +481,7 @@ def cleanup_session(user_id):
     if user_id in user_sessions:
         s = user_sessions[user_id]
         if s.get('input_path') and os.path.exists(s['input_path']):
-            os.remove(s['input_path']):
+            os.remove(s['input_path'])
         del user_sessions[user_id]
 
 async def main_async():
@@ -491,9 +496,10 @@ async def main_async():
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("newpack", start_new_pack_cmd))
+    app.add_handler(CommandHandler("addpack", start_add_to_existing_pack))
     app.add_handler(CommandHandler("buy", show_tariffs))
     app.add_handler(CommandHandler("mypacks", mypacks))
-    app.add_handler(CommandHandler("newpack", start_new_pack))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
@@ -511,19 +517,9 @@ if __name__ == '__main__':
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
         pass
-from rembg import remove
-from PIL import Image
-import io
+        await app.start()
+        await app.updater.start_polling()
+        await asyncio.Event().wait()
 
-def remove_bg_ai(input_path, output_path):
-    # Rasmni o'qish va AI orqali fonini kesish
-    with open(input_path, 'rb') as f:
-        img_data = f.read()
-    
-    output_data = remove(img_data)
-    
-    # Oq quyonlar yoki ob'ektlar ziyon ko'rmaydi
-    img = Image.open(io.BytesIO(output_data)).convert("RGBA")
-    img.thumbnail((512, 512))
-    img.save(output_path, "PNG")
-    return output_path
+if __name__ == '__main__':
+    asyncio.run(main_async())
