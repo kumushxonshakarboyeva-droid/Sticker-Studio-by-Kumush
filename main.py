@@ -4,7 +4,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
 from PIL import Image
-from rembg import remove
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputSticker, BotCommand, LabeledPrice
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, PreCheckoutQueryHandler, ContextTypes, filters
@@ -200,18 +199,12 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not emojis:
             emojis = list(text.strip())
         session['emoji_list'] = emojis[:20]
-
-        # Video bo'lsa, fon rangini so'raymiz. Rasm bo'lsa, AI ishlatiladi.
-        if session.get('media_type') == 'video':
-            session['step'] = 'WAITING_COLOR'
-            keyboard = [
-                [InlineKeyboardButton("🪄 Avto-aniqlash", callback_data="color=auto")],
-                [InlineKeyboardButton("🟢 Yashil", callback_data="color=0x00FF00"), InlineKeyboardButton("⚪ Oq", callback_data="color=0xFFFFFF"), InlineKeyboardButton("🖤 Qora", callback_data="color=0x000000")]
-            ]
-            await update.message.reply_text("4️⃣ Video orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            session['color_choice'] = 'ai'
-            await process_and_add_directly(update.message, context, user_id)
+        session['step'] = 'WAITING_COLOR'
+        keyboard = [
+            [InlineKeyboardButton("🪄 Avto-aniqlash", callback_data="color=auto")],
+            [InlineKeyboardButton("🟢 Yashil", callback_data="color=0x00FF00"), InlineKeyboardButton("⚪ Oq", callback_data="color=0xFFFFFF"), InlineKeyboardButton("🖤 Qora", callback_data="color=0x000000")]
+        ]
+        await update.message.reply_text("4️⃣ Orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     if text in ["➕ Yangi to'plam yaratish", "/newpack"]:
@@ -384,7 +377,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     await update.message.reply_text(msg)
 
 # ---------- Processing logic ----------
-async def process_and_add_directly(target_obj, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
     input_path = session['input_path']
     media_type = session['media_type']
@@ -410,34 +403,30 @@ async def process_and_add_directly(target_obj, context: ContextTypes.DEFAULT_TYP
         update_user_data(user_id, u_data)
 
     if not can_proceed:
-        text = "⚠️ Sizning bepul 3 ta stiker yaratish limitigingiz tugadi!\n\nDavom etish uchun VIP obuna yoki stiker paketi sotib oling: /buy"
-        if hasattr(target_obj, 'edit_message_text'):
-            await target_obj.edit_message_text(text)
-        else:
-            await target_obj.reply_text(text)
+        await query.edit_message_text(
+            "⚠️ Sizning bepul 3 ta stiker yaratish limitigingiz tugadi!\n\n"
+            "Davom etish uchun VIP obuna yoki stiker paketi sotib oling: /buy"
+        )
         cleanup_session(user_id)
         return
 
-    status_msg = "⏳ Stiker ishlanmoqda va to'plamga qo'shilmoqda..."
-    if hasattr(target_obj, 'edit_message_text'):
-        await target_obj.edit_message_text(status_msg)
-    else:
-        await target_obj.reply_text(status_msg)
+    await query.edit_message_text("⏳ Stiker ishlanmoqda va to'plamga qo'shilmoqda...")
 
     output_path = None
     try:
+        color_code = session['color_choice']
+        if color_code == "auto":
+            color_code = await detect_corner_color(input_path)
+        tol = "0.08"
+        
+        vf = (
+            f"colorkey={color_code}:{tol}:0.05,"
+            f"format=yuva420p,"
+            f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
+            f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+        )
+
         if media_type == 'video':
-            color_code = session['color_choice']
-            if color_code == "auto":
-                color_code = await detect_corner_color(input_path)
-            tol = "0.08"
-            
-            vf = (
-                f"colorkey={color_code}:{tol}:0.05,"
-                f"format=yuva420p,"
-                f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
-                f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
-            )
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.webm"
             ffmpeg_cmd = [
                 "ffmpeg", "-y", "-ss", "0", "-t", "3", "-i", input_path,
@@ -447,17 +436,12 @@ async def process_and_add_directly(target_obj, context: ContextTypes.DEFAULT_TYP
             subprocess.run(ffmpeg_cmd, check=True)
             st_format = "video"
         else:
-            # --- AI (rembg) RASMLAR UCHUN ---
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
-            inp_img = Image.open(input_path)
-            out_img = remove(inp_img)  # AI avto o'chiradi
-            
-            out_img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
-            final_img = Image.new("RGBA", (target_size, target_size), (0, 0, 0, 0))
-            offset = ((target_size - out_img.size[0]) // 2, (target_size - out_img.size[1]) // 2)
-            final_img.paste(out_img, offset)
-            final_img.save(output_path, "PNG")
-            
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vf", vf.replace("format=yuva420p,", ""), "-frames:v", "1", output_path
+            ]
+            subprocess.run(ffmpeg_cmd, check=True)
             st_format = "static"
 
         with open(output_path, 'rb') as sticker_file:
@@ -483,18 +467,11 @@ async def process_and_add_directly(target_obj, context: ContextTypes.DEFAULT_TYP
             f"🔗 To'plam: https://t.me/addstickers/{pack_name}\n"
         )
         
-        if hasattr(target_obj, 'edit_message_text'):
-            await target_obj.edit_message_text(res_text)
-        else:
-            await target_obj.reply_text(res_text)
+        await query.edit_message_text(res_text)
 
     except Exception as e:
         logger.error(f"Sticker process error: {e}")
-        err_msg = f"❌ Xatolik yuz berdi: {e}"
-        if hasattr(target_obj, 'edit_message_text'):
-            await target_obj.edit_message_text(err_msg)
-        else:
-            await target_obj.reply_text(err_msg)
+        await query.edit_message_text(f"❌ Xatolik yuz berdi: {e}")
     finally:
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
