@@ -445,19 +445,26 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
             st_format = "static"
 
         with open(output_path, 'rb') as sticker_file:
-            input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list)
+            input_sticker = InputSticker(
+                sticker=sticker_file, 
+                emoji_list=emoji_list, 
+                format=st_format
+            )
             try:
                 await context.bot.add_sticker_to_set(user_id=user_id, name=pack_name, sticker=input_sticker)
             except Exception:
                 sticker_file.seek(0)
-                input_sticker = InputSticker(sticker=sticker_file, emoji_list=emoji_list)
+                input_sticker = InputSticker(
+                    sticker=sticker_file, 
+                    emoji_list=emoji_list, 
+                    format=st_format
+                )
                 await context.bot.create_new_sticker_set(
                     user_id=user_id,
                     name=pack_name,
                     title=pack_title,
                     stickers=[input_sticker],
-                    sticker_type=pack_type,
-                    sticker_format=st_format
+                    sticker_type=pack_type
                 )
 
         save_pack_record(user_id, pack_name, pack_title, pack_type)
