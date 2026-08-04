@@ -1,7 +1,4 @@
-python-telegram-bot==21.0.1
-Pillow
-opencv-python-headless
-numpy
-python-telegram-bot
+python-telegram-bot==20.7
 rembg
-Pillow
+pillow
+onnxruntime
