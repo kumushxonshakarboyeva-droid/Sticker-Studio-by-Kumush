@@ -126,23 +126,21 @@ def main_menu_markup():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cleanup_session(update.effective_user.id)
-    # User ma'lumotlarini yaratib qo'yamiz (statistika va bazaga tushishi uchun)
-    get_user_data(update.effective_user.id)
+    used = get_user_daily_count(update.effective_user.id)
+    remaining = max(0, DAILY_LIMIT - used)
     
+    msg_text = f"""Salom! Xush kelibsiz! 🎬
+
+Men sizga rasm va videolaringizdan orqa fonsiz sifatli stiker hamda custom emojilar tayyorlab beraman.
+
+📊 Sizning bugungi limitiz: {used}/{DAILY_LIMIT} ta ishlatildi (Qolgan: {remaining} ta).
+
+Boshlash uchun "➕ Yangi to'plam yaratish" tugmasini bosing."""
+
     await update.message.reply_text(
-        "Salom! Xush kelibsiz! 🎬
-
-"
-        "Men sizga rasm va videolaringizdan orqa fonsiz sifatli stiker hamda custom emojilar tayyorlab beraman.
-
-"
-        "🎁 Har kuni 3 ta stikerni mutlaqo bepul yaratishingiz mumkin!
-
-"
-        "Boshlash uchun "➕ Yangi to'plam yaratish" tugmasini bosing.",
+        msg_text,
         reply_markup=main_menu_markup()
     )
-
 async def start_new_pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_sessions[user_id] = {'step': 'WAITING_NAME'}
