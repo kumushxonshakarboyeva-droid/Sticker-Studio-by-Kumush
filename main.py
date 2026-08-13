@@ -1,38 +1,26 @@
 import os
-import gc
-
-# RAM sarfini kamaytirish uchun muhit o'zgaruvchilari
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-import static_ffmpeg
-static_ffmpeg.add_paths()
-
 import re
 import json
 import subprocess
 import uuid
 import logging
 import asyncio
-from datetime import datetime
-
-from PIL import Image
-import onnxruntime as ort
-from rembg import remove, new_session
-from aiohttp import web
+import threading
+from datetime import datetime, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, 
     ReplyKeyboardMarkup, KeyboardButton, InputSticker, 
-    BotCommand
+    BotCommand, LabeledPrice
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, 
-    CallbackQueryHandler, ContextTypes, filters
+    CallbackQueryHandler, PreCheckoutQueryHandler, ContextTypes, filters
 )
+
+from PIL import Image
+from rembg import remove, new_session
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,28 +28,24 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 PACKS_FILE = "user_packs.json"
 USAGE_FILE = "user_usage.json"
-DAILY_LIMIT = 3
-
 user_sessions = {}
 
-# Rembg sessiyasini xavfsiz yuklash
-def get_rembg_session():
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 1
-    opts.inter_op_num_threads = 1
-    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-    return new_session("u2netp", providers=['CPUExecutionProvider'], sess_options=opts)
+# RAM tejamkorligi uchun rembg sessiyasi (faqat rasmlar uchun)
+REMBG_SESSION = new_session("u2netp")
 
-logger.info("Rembg modeli yuklanmoqda...")
-try:
-    REMBG_SESSION = get_rembg_session()
-    logger.info("Rembg modeli muvaffaqiyatli yuklandi!")
-except Exception as e:
-    logger.error(f"Rembg modelini yuklashda xatolik: {e}")
-    REMBG_SESSION = None
+# ---------- Health Check Server (Render uchun) ----------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-# ---------- JSON Database Helpers ----------
+def run_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# ---------- Database / Persistence ----------
 def load_json(filepath):
     if os.path.exists(filepath):
         try:
@@ -84,68 +68,95 @@ def save_pack_record(user_id: int, name: str, title: str, pack_type: str = "regu
     data[key] = packs
     save_json(PACKS_FILE, data)
 
-# ---------- Kunlik Limit Tizimi ----------
-def get_user_daily_count(user_id: int) -> int:
-    data = load_json(USAGE_FILE)
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_data = data.get(str(user_id), {})
-    if user_data.get("date") == today:
-        return user_data.get("count", 0)
-    return 0
+def get_user_data(user_id: int):
+    usage_data = load_json(USAGE_FILE)
+    key = str(user_id)
+    if key not in usage_data:
+        usage_data[key] = {
+            "free_count": 0,
+            "paid_credits": 0,
+            "vip_until": None
+        }
+        save_json(USAGE_FILE, usage_data)
+    return usage_data[key]
 
-def increment_user_daily_count(user_id: int):
-    data = load_json(USAGE_FILE)
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_data = data.get(str(user_id), {})
-    if user_data.get("date") == today:
-        count = user_data.get("count", 0) + 1
-    else:
-        count = 1
-    data[str(user_id)] = {"date": today, "count": count}
-    save_json(USAGE_FILE, data)
+def update_user_data(user_id: int, user_info: dict):
+    usage_data = load_json(USAGE_FILE)
+    usage_data[str(user_id)] = user_info
+    save_json(USAGE_FILE, usage_data)
 
-# ---------- Bot Buyruqlari va Tugmalar ----------
+def is_vip_active(user_info: dict) -> bool:
+    vip_until = user_info.get("vip_until")
+    if not vip_until:
+        return False
+    try:
+        expire_dt = datetime.fromisoformat(vip_until)
+        return datetime.now() < expire_dt
+    except Exception:
+        return False
+
+# ---------- Bot Commands ----------
 async def post_init(application):
     commands = [
         BotCommand("start", "Botni qayta ishga tushirish"),
-        BotCommand("newpack", "➕ Yangi to'plam yaratish"),
-        BotCommand("addpack", "📌 Joriy to'plamga qo'shish"),
-        BotCommand("mypacks", "Mening stiker to'plamlarim")
+        BotCommand("buy", "Stars orqali VIP/Stiker sotib olish"),
+        BotCommand("mypacks", "Mening stiker to'plamlarim"),
+        BotCommand("help", "Yo'riqnoma va yordam")
     ]
     await application.bot.set_my_commands(commands)
 
 def main_menu_markup():
     menu_buttons = [
         [KeyboardButton("➕ Yangi to'plam yaratish")],
-        [KeyboardButton("📌 Joriy to'plamga qo'shish"), KeyboardButton("📦 Mening to'plamlarim")]
+        [KeyboardButton("📌 Joriy to'plamga qo'shish")],
+        [KeyboardButton("💎 VIP va Tariflar"), KeyboardButton("📦 Mening to'plamlarim")]
     ]
     return ReplyKeyboardMarkup(menu_buttons, resize_keyboard=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cleanup_session(update.effective_user.id)
-    used = get_user_daily_count(update.effective_user.id)
-    remaining = max(0, DAILY_LIMIT - used)
-    
-    msg_text = (
-        "Salom! Xush kelibsiz! 🎬\n\n"
-        "Men sizga rasm va videolaringizdan orqa fonsiz sifatli stiker hamda custom emojilar tayyorlab beraman.\n\n"
-        f"📊 Sizning bugungi limitiz: {used}/{DAILY_LIMIT} ta ishlatildi (Qolgan: {remaining} ta).\n\n"
-        "Boshlash uchun \"➕ Yangi to'plam yaratish\" tugmasini bosing."
+    await update.message.reply_text(
+        "Salom! @Vid2Sticker_bot ga xush kelibsiz! 🎬\n\n"
+        "Men sizga video va rasmlaringizdan orqa fonsiz animatsion stiker hamda custom emojilar tayyorlab beraman.\n\n"
+        "🎁 Dastlabki 3 ta stikeringiz mutlaqo bepul!\n\n"
+        "Boshlash uchun \"➕ Yangi to'plam yaratish\" tugmasini bosing.",
+        reply_markup=main_menu_markup()
     )
-    await update.message.reply_text(msg_text, reply_markup=main_menu_markup())
 
-async def start_new_pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    used = get_user_daily_count(user_id)
-    if used >= DAILY_LIMIT:
-        await update.message.reply_text(
-            f"⚠️ Bugungi limitiz ({DAILY_LIMIT}/{DAILY_LIMIT}) tugadi!\n\n"
-            "Har kuni 3 ta bepul stiker tayyorlashingiz mumkin. Ertaga yana urinib ko'ring."
-        )
-        return
+    u_data = get_user_data(user_id)
+    
+    vip_status = "👑 VIP Obunangiz faol!" if is_vip_active(u_data) else "❌ VIP obuna yo'q"
+    credits = u_data.get("paid_credits", 0)
+    free_used = u_data.get("free_count", 0)
+    free_left = max(0, 3 - free_used)
 
-    user_sessions[user_id] = {'step': 'WAITING_NAME'}
-    await update.message.reply_text("1️⃣ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
+    text = (
+        f"📊 Sizning balansingiz:\n"
+        f"• Bepul limit: {free_left}/3 ta\n"
+        f"• Sotib olingan stikerlar: {credits} ta\n"
+        f"• Holat: {vip_status}\n\n"
+        "⭐ Telegram Stars orqali tariflar:\n"
+        "• 1 ta stiker — 10 Stars\n"
+        "• 10 talik paket — 50 Stars (50% chegirma)\n"
+        "• 1 haftalik VIP — 100 Stars\n"
+        "• 1 oylik VIP — 200 Stars\n"
+        "• 1 yillik VIP — 1000 Stars (Eng hamyonbop!)\n\n"
+        "Sotib olmoqchi bo'lgan tarifingizni tanlang:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("⚡ 1 ta stiker (10 ⭐)", callback_data="buy_1"), InlineKeyboardButton("📦 10 talik paket (50 ⭐)", callback_data="buy_10")],
+        [InlineKeyboardButton("📅 1 haftalik VIP (100 ⭐)", callback_data="buy_week")],
+        [InlineKeyboardButton("🌙 1 oylik VIP (200 ⭐)", callback_data="buy_month")],
+        [InlineKeyboardButton("👑 1 yillik VIP (1000 ⭐)", callback_data="buy_year")]
+    ]
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 def sanitize_pack_name(raw_text: str, user_id: int, bot_username: str, is_emoji: bool = False) -> str:
     suffix = f"_by_{bot_username}"
@@ -177,7 +188,7 @@ async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• {p['title']} ({ptype})\nhttps://t.me/addstickers/{p['name']}\n")
     await update.message.reply_text("\n".join(lines))
 
-# ---------- Matn va Media Handlerlari ----------
+# ---------- Text & Media Handlers ----------
 async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.message.from_user.id
@@ -199,26 +210,32 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             emojis = list(text.strip())
         session['emoji_list'] = emojis[:20]
         
-        await process_and_add_directly(update, context, user_id)
+        # Agar rasm bo'lsa colorkey shart emas, lekin video bo'lsa so'raymiz
+        if session.get('media_type') == 'video':
+            session['step'] = 'WAITING_COLOR'
+            keyboard = [
+                [InlineKeyboardButton("🪄 Avto-aniqlash", callback_data="color=auto")],
+                [InlineKeyboardButton("🟢 Yashil", callback_data="color=0x00FF00"), InlineKeyboardButton("⚪ Oq", callback_data="color=0xFFFFFF"), InlineKeyboardButton("🖤 Qora", callback_data="color=0x000000")]
+            ]
+            await update.message.reply_text("4️⃣ Video orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            # Rasm bo'lsa to'g'ridan-to'g'ri rembg ishlatamiz
+            session['color_choice'] = 'rembg'
+            await process_and_add_directly_wrapper(update, context, user_id)
         return
 
-    if text in ["➕ Yangi to'plam yaratish", "/newpack"]:
-        await start_new_pack_cmd(update, context)
-    elif text in ["📌 Joriy to'plamga qo'shish", "/addpack"]:
+    if text == "➕ Yangi to'plam yaratish":
+        user_sessions[user_id] = {'step': 'WAITING_NAME'}
+        await update.message.reply_text("1️⃣ To'plam uchun nom kiriting (masalan: Mening Stikerlarim):")
+    elif text == "📌 Joriy to'plamga qo'shish":
         await start_add_to_existing_pack(update, context)
+    elif text in ["💎 VIP va Tariflar", "/buy"]:
+        await show_tariffs(update, context)
     elif text == "📦 Mening to'plamlarim":
         await mypacks(update, context)
 
 async def start_add_to_existing_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    used = get_user_daily_count(user_id)
-    if used >= DAILY_LIMIT:
-        await update.message.reply_text(
-            f"⚠️ Bugungi limitiz ({DAILY_LIMIT}/{DAILY_LIMIT}) tugadi!\n\n"
-            "Har kuni 3 ta bepul stiker tayyorlashingiz mumkin. Ertaga yana urinib ko'ring."
-        )
-        return
-
     data = load_json(PACKS_FILE)
     packs = data.get(str(user_id), [])
     if not packs:
@@ -234,15 +251,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not session or session.get('step') != 'WAITING_FILE':
         await message.reply_text("Iltimos, avval \"➕ Yangi to'plam yaratish\" tugmasini bosib, nom kiriting.")
-        return
-
-    used = get_user_daily_count(user_id)
-    if used >= DAILY_LIMIT:
-        await message.reply_text(
-            f"⚠️ Bugungi limitiz ({DAILY_LIMIT}/{DAILY_LIMIT}) tugadi!\n\n"
-            "Ertaga yana 3 ta stiker yaratishingiz mumkin."
-        )
-        cleanup_session(user_id)
         return
 
     video = message.video or message.animation
@@ -272,13 +280,53 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Media download error: {e}")
         await message.reply_text(f"❌ Faylni yuklab olishda xatolik: {e}")
 
-# ---------- Callbacks ----------
+async def detect_corner_color(input_path):
+    try:
+        cmd = [
+            "ffmpeg", "-i", input_path, "-vf",
+            "split=4[a][b][c][d];[a]crop=1:1:0:0[tl];[b]crop=1:1:iw-1:0[tr];[c]crop=1:1:0:ih-1[bl];[d]crop=1:1:iw-1:ih-1[br];[tl][tr][bl][br]hstack=4,format=rgb24",
+            "-vframes", "1", "-f", "rawvideo", "pipe:1"
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if len(res.stdout) >= 3:
+            corners = []
+            for i in range(0, min(len(res.stdout) - 2, 12), 3):
+                r, g, b = res.stdout[i], res.stdout[i + 1], res.stdout[i + 2]
+                corners.append(f"0x{r:02X}{g:02X}{b:02X}")
+            if corners:
+                return max(set(corners), key=corners.count)
+    except Exception as e:
+        logger.warning(f"Corner detection failed: {e}")
+    return "0x00FF00"
+
+# ---------- Callbacks & Payments ----------
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
     session = user_sessions.get(user_id)
+
+    if data.startswith("buy_"):
+        plan = data.split("_")[1]
+        prices = {
+            "1": (10, "1 ta stiker yaratish"),
+            "10": (50, "10 ta stiker yaratish"),
+            "week": (100, "1 Haftalik VIP obuna"),
+            "month": (200, "1 Oylik VIP obuna"),
+            "year": (1000, "1 Yillik VIP obuna")
+        }
+        stars, title = prices[plan]
+        await context.bot.send_invoice(
+            chat_id=user_id,
+            title=title,
+            description=f"@Vid2Sticker_bot xizmati uchun {stars} Stars to'lov",
+            payload=f"plan_{plan}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(title, stars)]
+        )
+        return
 
     if data.startswith("type="):
         pack_type = data.split("=", 1)[1]
@@ -310,14 +358,63 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_text = "100x100 Emoji" if pack.get('type') == 'custom_emoji' else "512x512 Stiker"
         await query.edit_message_text(f"To'plam: {pack['title']} ({size_text})\n\n2️⃣ Endi menga rasm yoki video yuboring.")
 
-# ---------- Optimizatsiya qilingan REMBG va Stiker Tayyorlash ----------
+    elif data.startswith("color="):
+        if not session or not os.path.exists(session.get('input_path', '')):
+            await query.edit_message_text("❌ Fayl topilmadi. Qaytadan boshlang.")
+            return
+        session['color_choice'] = data.split("=", 1)[1]
+        await process_and_add_directly(query, context, user_id)
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    payload = update.message.successful_payment.invoice_payload
+    u_data = get_user_data(user_id)
+    now = datetime.now()
+
+    if payload == "plan_1":
+        u_data["paid_credits"] = u_data.get("paid_credits", 0) + 1
+        msg = "🎉 To'lov muvaffaqiyatli! Sizga 1 ta stiker yaratish limiti qo'shildi."
+    elif payload == "plan_10":
+        u_data["paid_credits"] = u_data.get("paid_credits", 0) + 10
+        msg = "🎉 To'lov muvaffaqiyatli! Sizga 10 ta stiker yaratish limiti qo'shildi."
+    elif payload == "plan_week":
+        u_data["vip_until"] = (now + timedelta(days=7)).isoformat()
+        msg = "👑 VIP obunangiz 1 haftaga faollashtirildi!"
+    elif payload == "plan_month":
+        u_data["vip_until"] = (now + timedelta(days=30)).isoformat()
+        msg = "👑 VIP obunangiz 1 oyga faollashtirildi!"
+    elif payload == "plan_year":
+        u_data["vip_until"] = (now + timedelta(days=365)).isoformat()
+        msg = "👑 VIP obunangiz 1 yilga faollashtirildi!"
+
+    update_user_data(user_id, u_data)
+    await update.message.reply_text(msg)
+
+async def process_and_add_directly_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    # Text orqali kelgan holat uchun (rasmlar uchun)
+    session = user_sessions.get(user_id)
+    if not session:
+        return
+    
+    # Fake query object yaratamiz message.reply_text uchun
+    class FakeQuery:
+        def __init__(self, msg):
+            self.message = msg
+        async def edit_message_text(self, text, **kwargs):
+            return await self.message.reply_text(text, **kwargs)
+
+    fake_q = FakeQuery(update.message)
+    await process_and_add_directly(fake_q, context, user_id)
+
+# ---------- Processing logic (Rembg + Colorkey) ----------
 def process_image_rembg(input_path: str, output_path: str, target_size: int):
     input_img = Image.open(input_path).convert("RGBA")
     input_img.thumbnail((512, 512), Image.Resampling.LANCZOS)
     
-    if REMBG_SESSION is None:
-        raise Exception("Rembg sessiyasi yuklanmagan!")
-        
     output_img = remove(input_img, session=REMBG_SESSION)
 
     w, h = output_img.size
@@ -333,18 +430,7 @@ def process_image_rembg(input_path: str, output_path: str, target_size: int):
     canvas.paste(resized_img, ((target_size - new_w) // 2, (target_size - new_h) // 2), resized_img)
     canvas.save(output_path, "PNG")
 
-def convert_video_to_webm(input_path: str, output_path: str, target_size: int):
-    bitrate = "128k" if target_size == 100 else "256k"
-    vf = f"fps=15,scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
-    ffmpeg_cmd = [
-        "ffmpeg", "-y", "-ss", "0", "-t", "3", "-i", input_path,
-        "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
-        "-threads", "1",
-        "-auto-alt-ref", "0", "-b:v", bitrate, output_path
-    ]
-    subprocess.run(ffmpeg_cmd, check=True)
-
-async def process_and_add_directly(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
     if not session:
         return
@@ -358,15 +444,57 @@ async def process_and_add_directly(update: Update, context: ContextTypes.DEFAULT
     
     target_size = 100 if pack_type == 'custom_emoji' else 512
 
-    status_msg = await update.message.reply_text("✂️ Orqa fon olib tashlanmoqda va stiker yaratilmoqda...")
+    # Limits Check
+    u_data = get_user_data(user_id)
+    can_proceed = False
+
+    if is_vip_active(u_data):
+        can_proceed = True
+    elif u_data.get("paid_credits", 0) > 0:
+        can_proceed = True
+        u_data["paid_credits"] -= 1
+        update_user_data(user_id, u_data)
+    elif u_data.get("free_count", 0) < 3:
+        can_proceed = True
+        u_data["free_count"] += 1
+        update_user_data(user_id, u_data)
+
+    if not can_proceed:
+        await query.edit_message_text(
+            "⚠️ Sizning bepul 3 ta stiker yaratish limitigingiz tugadi!\n\n"
+            "Davom etish uchun VIP obuna yoki stiker paketi sotib oling: /buy"
+        )
+        cleanup_session(user_id)
+        return
+
+    await query.edit_message_text("⏳ Stiker ishlanmoqda va to'plamga qo'shilmoqda...")
 
     output_path = None
     try:
         if media_type == 'video':
+            # Video uchun colorkey (FFmpeg)
+            color_code = session.get('color_choice', '0x00FF00')
+            if color_code == "auto":
+                color_code = await detect_corner_color(input_path)
+            tol = "0.3"
+            
+            vf = (
+                f"colorkey={color_code}:{tol}:0.1,"
+                f"format=yuva420p,"
+                f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,"
+                f"pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+            )
+            
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.webm"
-            await asyncio.to_thread(convert_video_to_webm, input_path, output_path, target_size)
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-ss", "0", "-t", "3", "-i", input_path,
+                "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+                "-auto-alt-ref", "0", "-b:v", "128k" if target_size==100 else "256k", output_path
+            ]
+            subprocess.run(ffmpeg_cmd, check=True)
             st_format = "video"
         else:
+            # Rasm uchun rembg (AI)
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
             await asyncio.to_thread(process_image_rembg, input_path, output_path, target_size)
             st_format = "static"
@@ -395,26 +523,21 @@ async def process_and_add_directly(update: Update, context: ContextTypes.DEFAULT
                 )
 
         save_pack_record(user_id, pack_name, pack_title, pack_type)
-        increment_user_daily_count(user_id)
         
-        used = get_user_daily_count(user_id)
-        remaining = max(0, DAILY_LIMIT - used)
-
         res_text = (
             f"✅ Stiker muvaffaqiyatli qo'shildi!\n\n"
-            f"🔗 To'plam: https://t.me/addstickers/{pack_name}\n\n"
-            f"📊 Bugungi limitiz: {used}/{DAILY_LIMIT} (Qolgan: {remaining} ta)"
+            f"🔗 To'plam: https://t.me/addstickers/{pack_name}\n"
         )
-        await status_msg.edit_text(res_text)
+        
+        await query.edit_message_text(res_text)
 
     except Exception as e:
         logger.error(f"Sticker process error: {e}")
-        await status_msg.edit_text(f"❌ Xatolik yuz berdi: {e}")
+        await query.edit_message_text(f"❌ Xatolik yuz berdi: {e}")
     finally:
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         cleanup_session(user_id)
-        gc.collect()
 
 def cleanup_session(user_id):
     if user_id in user_sessions:
@@ -422,10 +545,6 @@ def cleanup_session(user_id):
         if s.get('input_path') and os.path.exists(s['input_path']):
             os.remove(s['input_path'])
         del user_sessions[user_id]
-
-# ---------- Render Port Web Server & Main Async ----------
-async def handle_ping(request):
-    return web.Response(text="Bot is running")
 
 async def main_async():
     app = (
@@ -439,20 +558,13 @@ async def main_async():
         .build()
     )
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("newpack", start_new_pack_cmd))
-    app.add_handler(CommandHandler("addpack", start_add_to_existing_pack))
+    app.add_handler(CommandHandler("buy", show_tariffs))
     app.add_handler(CommandHandler("mypacks", mypacks))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message_text))
-
-    web_app = web.Application()
-    web_app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
 
     async with app:
         await app.start()
@@ -460,6 +572,7 @@ async def main_async():
         await asyncio.Event().wait()
 
 if __name__ == '__main__':
+    threading.Thread(target=run_health_check_server, daemon=True).start()
     try:
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
