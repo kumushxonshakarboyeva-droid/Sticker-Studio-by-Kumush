@@ -1,3 +1,9 @@
+import static_ffmpeg
+static_ffmpeg.add_paths()
+
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import os
 import re
 import json
