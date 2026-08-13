@@ -3,3 +3,4 @@ Pillow
 rembg[cpu]
 onnxruntime
 aiohttp
+static-ffmpeg
