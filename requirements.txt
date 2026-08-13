@@ -1,4 +1,4 @@
-python-telegram-bot>=20.0
-rembg
+python-telegram-bot
 Pillow
-onnxruntime
+rembg
+aiohttp
