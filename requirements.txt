@@ -1,6 +1,3 @@
 python-telegram-bot
-Pillow
-rembg[cpu]
-onnxruntime
-aiohttp
-static-ffmpeg
+rembg
+pillow
