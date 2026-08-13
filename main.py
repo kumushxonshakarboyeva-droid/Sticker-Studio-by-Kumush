@@ -25,7 +25,9 @@ from rembg import remove, new_session
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
+TOKEN = os.environ.get("BOT_TOKEN", "8953691717:AAEftbdxTdAdE-ALhdzujE3Pve_DOtIzCp8")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "979805620"))  # <-- O'z Telegram ID ingizni yozing
+
 PACKS_FILE = "user_packs.json"
 USAGE_FILE = "user_usage.json"
 user_sessions = {}
@@ -101,6 +103,7 @@ async def post_init(application):
         BotCommand("start", "Botni qayta ishga tushirish"),
         BotCommand("buy", "Stars orqali VIP/Stiker sotib olish"),
         BotCommand("mypacks", "Mening stiker to'plamlarim"),
+        BotCommand("users", "Foydalanuvchilar statistikasi (Admin)"),
         BotCommand("help", "Yo'riqnoma va yordam")
     ]
     await application.bot.set_my_commands(commands)
@@ -127,6 +130,10 @@ async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     u_data = get_user_data(user_id)
     
+    if user_id == ADMIN_ID:
+        await update.message.reply_text("👑 Siz bot egasisiz! Sizda barcha cheklovlar olib tashlangan (Cheksiz limit).")
+        return
+
     vip_status = "👑 VIP Obunangiz faol!" if is_vip_active(u_data) else "❌ VIP obuna yo'q"
     credits = u_data.get("paid_credits", 0)
     free_used = u_data.get("free_count", 0)
@@ -157,6 +164,33 @@ async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_users_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Bu buyruq faqat bot egasi uchun!")
+        return
+
+    usage_data = load_json(USAGE_FILE)
+    packs_data = load_json(PACKS_FILE)
+    
+    total_users = len(usage_data)
+    text = f"📊 **Bot foydalanuvchilari statistikasi:**\n\nJami foydalanuvchilar: {total_users} ta\n\n"
+    
+    count = 0
+    for uid, info in usage_data.items():
+        if count >= 30:  # Xabar uzun bo'lib ketmasligi uchun oxirgi 30tasini ko'rsatamiz
+            text += "\n...va boshqa foydalanuvchilar."
+            break
+        free = info.get("free_count", 0)
+        paid = info.get("paid_credits", 0)
+        vip = "Ha" if is_vip_active(info) else "Yo'q"
+        p_count = len(packs_data.get(uid, []))
+        
+        text += f"👤 `{uid}` | Bepul: {free}/3 | Balans: {paid} | VIP: {vip} | To'plamlar: {p_count} ta\n"
+        count += 1
+
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 def sanitize_pack_name(raw_text: str, user_id: int, bot_username: str, is_emoji: bool = False) -> str:
     suffix = f"_by_{bot_username}"
@@ -210,7 +244,6 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             emojis = list(text.strip())
         session['emoji_list'] = emojis[:20]
         
-        # Agar rasm bo'lsa colorkey shart emas, lekin video bo'lsa so'raymiz
         if session.get('media_type') == 'video':
             session['step'] = 'WAITING_COLOR'
             keyboard = [
@@ -219,7 +252,6 @@ async def handle_message_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             ]
             await update.message.reply_text("4️⃣ Video orqa fon rangini tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            # Rasm bo'lsa to'g'ridan-to'g'ri rembg ishlatamiz
             session['color_choice'] = 'rembg'
             await process_and_add_directly_wrapper(update, context, user_id)
         return
@@ -395,12 +427,10 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     await update.message.reply_text(msg)
 
 async def process_and_add_directly_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    # Text orqali kelgan holat uchun (rasmlar uchun)
     session = user_sessions.get(user_id)
     if not session:
         return
     
-    # Fake query object yaratamiz message.reply_text uchun
     class FakeQuery:
         def __init__(self, msg):
             self.message = msg
@@ -444,11 +474,11 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
     
     target_size = 100 if pack_type == 'custom_emoji' else 512
 
-    # Limits Check
+    # --- ADMIN VA LİMİT TEKSHIRISH ---
     u_data = get_user_data(user_id)
     can_proceed = False
 
-    if is_vip_active(u_data):
+    if user_id == ADMIN_ID or is_vip_active(u_data):
         can_proceed = True
     elif u_data.get("paid_credits", 0) > 0:
         can_proceed = True
@@ -472,7 +502,6 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
     output_path = None
     try:
         if media_type == 'video':
-            # Video uchun colorkey (FFmpeg)
             color_code = session.get('color_choice', '0x00FF00')
             if color_code == "auto":
                 color_code = await detect_corner_color(input_path)
@@ -494,7 +523,6 @@ async def process_and_add_directly(query, context: ContextTypes.DEFAULT_TYPE, us
             subprocess.run(ffmpeg_cmd, check=True)
             st_format = "video"
         else:
-            # Rasm uchun rembg (AI)
             output_path = f"out_{user_id}_{str(uuid.uuid4())[:5]}.png"
             await asyncio.to_thread(process_image_rembg, input_path, output_path, target_size)
             st_format = "static"
@@ -560,6 +588,7 @@ async def main_async():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buy", show_tariffs))
     app.add_handler(CommandHandler("mypacks", mypacks))
+    app.add_handler(CommandHandler("users", admin_users_stats))
     app.add_handler(MessageHandler(filters.VIDEO | filters.ANIMATION | filters.PHOTO, handle_media))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
