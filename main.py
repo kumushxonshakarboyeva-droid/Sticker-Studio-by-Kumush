@@ -45,7 +45,9 @@ MAX_FILE_MB = int(
     os.getenv("MAX_FILE_MB", "50")
 )
 
-MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
+MAX_FILE_SIZE = (
+    MAX_FILE_MB * 1024 * 1024
+)
 
 TEMP_DIR = Path(
     os.getenv(
@@ -75,12 +77,12 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(
-    "MotionStickerBot"
+    "MotionLabBot"
 )
 
 
 # ============================================================
-# SESSION
+# USER SESSIONS
 # ============================================================
 
 user_sessions = {}
@@ -90,7 +92,8 @@ user_sessions = {}
 # DATABASE
 # ============================================================
 
-def db():
+def get_db():
+
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30
@@ -103,7 +106,7 @@ def db():
 
 def init_db():
 
-    conn = db()
+    conn = get_db()
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -117,10 +120,10 @@ def init_db():
     """)
 
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS usage (
+        CREATE TABLE IF NOT EXISTS daily_usage (
             user_id INTEGER NOT NULL,
             usage_date TEXT NOT NULL,
-            count INTEGER NOT NULL DEFAULT 0,
+            sticker_count INTEGER NOT NULL DEFAULT 0,
 
             PRIMARY KEY (
                 user_id,
@@ -140,11 +143,6 @@ def init_db():
         )
     """)
 
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_usage_date
-        ON usage(usage_date)
-    """)
-
     conn.commit()
     conn.close()
 
@@ -157,12 +155,17 @@ def init_db():
 # USERS
 # ============================================================
 
+def is_admin(user_id):
+
+    return user_id == ADMIN_ID
+
+
 def register_user(user):
 
     if not user:
         return
 
-    conn = db()
+    conn = get_db()
 
     conn.execute("""
         INSERT INTO users (
@@ -191,13 +194,8 @@ def register_user(user):
     conn.close()
 
 
-def is_admin(user_id):
-
-    return user_id == ADMIN_ID
-
-
 # ============================================================
-# LIMIT
+# LIMIT SYSTEM
 # ============================================================
 
 def today():
@@ -205,14 +203,14 @@ def today():
     return date.today().isoformat()
 
 
-def get_usage(user_id):
+def get_today_usage(user_id):
 
-    conn = db()
+    conn = get_db()
 
     row = conn.execute("""
-        SELECT count
+        SELECT sticker_count
 
-        FROM usage
+        FROM daily_usage
 
         WHERE user_id = ?
         AND usage_date = ?
@@ -224,28 +222,31 @@ def get_usage(user_id):
     conn.close()
 
     if row:
-        return row["count"]
+        return row["sticker_count"]
 
     return 0
 
 
-def consume_usage(user_id):
+def consume_sticker(user_id):
 
+    # ADMIN = UNLIMITED
     if is_admin(user_id):
+
         return True, None
 
-    conn = db()
+    conn = get_db()
 
     try:
 
+        # Prevent simultaneous requests
         conn.execute(
             "BEGIN IMMEDIATE"
         )
 
         row = conn.execute("""
-            SELECT count
+            SELECT sticker_count
 
-            FROM usage
+            FROM daily_usage
 
             WHERE user_id = ?
             AND usage_date = ?
@@ -255,23 +256,26 @@ def consume_usage(user_id):
         )).fetchone()
 
         used = (
-            row["count"]
+            row["sticker_count"]
             if row
             else 0
         )
 
+        # LIMIT REACHED
         if used >= DAILY_LIMIT:
 
             conn.rollback()
 
             return False, 0
 
+        # UPDATE
         if row:
 
             conn.execute("""
-                UPDATE usage
+                UPDATE daily_usage
 
-                SET count = count + 1
+                SET sticker_count =
+                    sticker_count + 1
 
                 WHERE user_id = ?
                 AND usage_date = ?
@@ -280,13 +284,14 @@ def consume_usage(user_id):
                 today()
             ))
 
+        # INSERT
         else:
 
             conn.execute("""
-                INSERT INTO usage (
+                INSERT INTO daily_usage (
                     user_id,
                     usage_date,
-                    count
+                    sticker_count
                 )
 
                 VALUES (?, ?, 1)
@@ -310,7 +315,7 @@ def consume_usage(user_id):
         conn.rollback()
 
         logger.exception(
-            "Usage error"
+            "Limit error"
         )
 
         raise
@@ -320,20 +325,20 @@ def consume_usage(user_id):
         conn.close()
 
 
-def rollback_usage(user_id):
+def rollback_sticker(user_id):
 
     if is_admin(user_id):
         return
 
-    conn = db()
+    conn = get_db()
 
     conn.execute("""
-        UPDATE usage
+        UPDATE daily_usage
 
-        SET count =
+        SET sticker_count =
             CASE
-                WHEN count > 0
-                THEN count - 1
+                WHEN sticker_count > 0
+                THEN sticker_count - 1
                 ELSE 0
             END
 
@@ -349,7 +354,7 @@ def rollback_usage(user_id):
 
 
 # ============================================================
-# PACKS
+# PACK DATABASE
 # ============================================================
 
 def get_pack(
@@ -357,7 +362,7 @@ def get_pack(
     sticker_format
 ):
 
-    conn = db()
+    conn = get_db()
 
     row = conn.execute("""
         SELECT *
@@ -387,7 +392,7 @@ def save_pack(
     sticker_format
 ):
 
-    conn = db()
+    conn = get_db()
 
     conn.execute("""
         INSERT OR IGNORE INTO packs (
@@ -413,29 +418,34 @@ def save_pack(
 # PACK NAME
 # ============================================================
 
-def create_pack_name(
+def generate_pack_name(
     user_id,
     sticker_format
 ):
 
-    suffix = (
-        "by_motionlab_bot"
+    prefix = (
+        "motion"
+        if sticker_format == "video"
+        else "static"
     )
 
-    if sticker_format == "video":
-        prefix = "motion"
-
-    else:
-        prefix = "static"
+    # Telegram pack name must end with _by_<bot>
+    bot_username = (
+        os.getenv(
+            "BOT_USERNAME",
+            "MotionLabBot"
+        )
+        .replace("@", "")
+    )
 
     return (
         f"{prefix}_{user_id}_"
-        f"{suffix}"
+        f"by_{bot_username}"
     )
 
 
 # ============================================================
-# FILE HELPERS
+# FILE CLEANUP
 # ============================================================
 
 def remove_file(path):
@@ -453,7 +463,7 @@ def remove_file(path):
     except Exception:
 
         logger.exception(
-            "Could not remove %s",
+            "Could not remove file: %s",
             path
         )
 
@@ -481,10 +491,10 @@ def cleanup_session(user_id):
 # FFMPEG
 # ============================================================
 
-def ffmpeg(command):
+def run_ffmpeg(command):
 
     logger.info(
-        "FFmpeg: %s",
+        "FFmpeg command: %s",
         " ".join(
             map(str, command)
         )
@@ -500,6 +510,7 @@ def ffmpeg(command):
     if result.returncode != 0:
 
         logger.error(
+            "FFmpeg ERROR:\n%s",
             result.stderr
         )
 
@@ -511,58 +522,113 @@ def ffmpeg(command):
 
 
 # ============================================================
-# HEX COLOR
+# STATIC STICKER
 # ============================================================
 
-def normalize_hex_color(value):
-
-    value = value.strip()
-
-    if value.startswith("#"):
-        value = value[1:]
-
-    if len(value) != 6:
-        raise ValueError(
-            "Rang #RRGGBB formatida bo'lishi kerak."
-        )
-
-    if not re.fullmatch(
-        r"[0-9a-fA-F]{6}",
-        value
-    ):
-        raise ValueError(
-            "Noto'g'ri rang."
-        )
-
-    return "#" + value
-
-
-# ============================================================
-# VIDEO → TRANSPARENT WEBM
-# ============================================================
-
-def make_transparent_webm(
+def convert_photo(
     input_path,
-    output_path,
-    color="#00FF00",
-    similarity="0.25"
+    output_path
 ):
 
-    color = normalize_hex_color(
-        color
-    )
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        str(input_path),
+
+        "-vf",
+        (
+            "scale=512:512:"
+            "force_original_aspect_ratio=decrease,"
+            "pad=512:512:"
+            "(ow-iw)/2:"
+            "(oh-ih)/2"
+        ),
+
+        "-frames:v",
+        "1",
+
+        str(output_path)
+    ]
+
+    run_ffmpeg(command)
+
+
+# ============================================================
+# VIDEO → WEBM
+# ============================================================
+
+def convert_video(
+    input_path,
+    output_path
+):
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        str(input_path),
+
+        "-vf",
+        (
+            "scale=512:512:"
+            "force_original_aspect_ratio=decrease,"
+            "pad=512:512:"
+            "(ow-iw)/2:"
+            "(oh-ih)/2:"
+            "color=black@0"
+        ),
+
+        "-an",
+
+        "-c:v",
+        "libvpx-vp9",
+
+        "-pix_fmt",
+        "yuva420p",
+
+        "-b:v",
+        "0",
+
+        "-crf",
+        "35",
+
+        "-t",
+        "3",
+
+        str(output_path)
+    ]
+
+    run_ffmpeg(command)
+
+
+# ============================================================
+# CHROMA KEY
+# ============================================================
+
+def convert_chromakey(
+    input_path,
+    output_path,
+    color,
+    similarity
+):
 
     try:
-        similarity_float = float(
+
+        similarity = float(
             similarity
         )
-    except ValueError:
-        similarity_float = 0.25
 
-    similarity_float = max(
+    except Exception:
+
+        similarity = 0.25
+
+    similarity = max(
         0.01,
         min(
-            similarity_float,
+            similarity,
             0.90
         )
     )
@@ -579,7 +645,7 @@ def make_transparent_webm(
         (
             f"chromakey="
             f"{color}:"
-            f"{similarity_float}:"
+            f"{similarity}:"
             f"0.05,"
             "scale=512:512:"
             "force_original_aspect_ratio=decrease,"
@@ -609,90 +675,7 @@ def make_transparent_webm(
         str(output_path)
     ]
 
-    ffmpeg(command)
-
-
-# ============================================================
-# VIDEO WITHOUT CHROMAKEY
-# ============================================================
-
-def make_webm(
-    input_path,
-    output_path
-):
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(input_path),
-
-        "-vf",
-        (
-            "scale=512:512:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=512:512:"
-            "(ow-iw)/2:"
-            "(oh-ih)/2:"
-            "color=black@0"
-        ),
-
-        "-an",
-
-        "-c:v",
-        "libvpx-vp9",
-
-        "-pix_fmt",
-        "yuva420p",
-
-        "-b:v",
-        "0",
-
-        "-crf",
-        "35",
-
-        "-t",
-        "3",
-
-        str(output_path)
-    ]
-
-    ffmpeg(command)
-
-
-# ============================================================
-# PHOTO
-# ============================================================
-
-def make_png(
-    input_path,
-    output_path
-):
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(input_path),
-
-        "-vf",
-        (
-            "scale=512:512:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=512:512:"
-            "(ow-iw)/2:"
-            "(oh-ih)/2"
-        ),
-
-        "-frames:v",
-        "1",
-
-        str(output_path)
-    ]
-
-    ffmpeg(command)
+    run_ffmpeg(command)
 
 
 # ============================================================
@@ -710,35 +693,42 @@ async def start(
 
     if is_admin(user.id):
 
-        await update.message.reply_text(
-            "👑 <b>ADMIN MODE</b>\n\n"
-            "♾️ Siz uchun limit cheksiz.\n\n"
+        text = (
+            "👑 <b>MotionLab Admin</b>\n\n"
+            "♾️ Sizda kunlik limit yo'q.\n\n"
             "📊 /stats\n"
             "👥 /users\n"
             "🎨 /mypacks\n"
-            "📈 /limit",
-            parse_mode="HTML"
+            "📈 /limit"
         )
 
-        return
+    else:
 
-    remaining = (
-        DAILY_LIMIT
-        - get_usage(user.id)
-    )
+        used = get_today_usage(
+            user.id
+        )
+
+        remaining = max(
+            0,
+            DAILY_LIMIT - used
+        )
+
+        text = (
+            "👋 <b>MotionLab Sticker Bot</b>\n\n"
+            "🎨 Video, GIF yoki rasm yuboring.\n\n"
+            f"📊 Bugungi limit: "
+            f"{remaining}/{DAILY_LIMIT}\n\n"
+            "🔄 Limit har kuni avtomatik yangilanadi."
+        )
 
     await update.message.reply_text(
-        "👋 <b>MotionLab Sticker Bot</b>\n\n"
-        "🎨 Video, GIF yoki rasm yuboring.\n\n"
-        f"📊 Bugungi limit: "
-        f"{remaining}/{DAILY_LIMIT}\n\n"
-        "🔄 Limit har kuni yangilanadi.",
+        text,
         parse_mode="HTML"
     )
 
 
 # ============================================================
-# LIMIT COMMAND
+# LIMIT
 # ============================================================
 
 async def limit_command(
@@ -754,12 +744,12 @@ async def limit_command(
 
         await update.message.reply_text(
             "👑 ADMIN\n\n"
-            "♾️ Sizda kunlik limit yo'q."
+            "♾️ Siz uchun limit cheksiz."
         )
 
         return
 
-    used = get_usage(
+    used = get_today_usage(
         user.id
     )
 
@@ -778,7 +768,7 @@ async def limit_command(
 
 
 # ============================================================
-# MEDIA
+# MEDIA HANDLER
 # ============================================================
 
 async def handle_media(
@@ -793,10 +783,10 @@ async def handle_media(
     user_id = user.id
 
     # --------------------------------------------------------
-    # LIMIT
+    # LIMIT CHECK
     # --------------------------------------------------------
 
-    allowed, remaining = consume_usage(
+    allowed, remaining = consume_sticker(
         user_id
     )
 
@@ -804,8 +794,8 @@ async def handle_media(
 
         await update.message.reply_text(
             "⛔ <b>Bugungi limitingiz tugadi.</b>\n\n"
-            f"📦 Limit: {DAILY_LIMIT} ta\n"
-            "🔄 Ertaga yangilanadi.",
+            f"📦 Kunlik limit: {DAILY_LIMIT}\n"
+            "🔄 Ertaga avtomatik yangilanadi.",
             parse_mode="HTML"
         )
 
@@ -817,68 +807,48 @@ async def handle_media(
     try:
 
         # ----------------------------------------------------
-        # MEDIA TYPE
+        # DETECT FILE
         # ----------------------------------------------------
 
         if update.message.video:
 
             media = update.message.video
-
             extension = ".mp4"
-
-            file_size = (
-                media.file_size or 0
-            )
-
             source_type = "video"
 
         elif update.message.animation:
 
             media = update.message.animation
-
             extension = ".gif"
-
-            file_size = (
-                media.file_size or 0
-            )
-
             source_type = "video"
 
         elif update.message.photo:
 
-            media = (
-                update.message.photo[-1]
-            )
-
+            media = update.message.photo[-1]
             extension = ".jpg"
-
-            file_size = (
-                media.file_size or 0
-            )
-
             source_type = "static"
 
         else:
 
-            rollback_usage(
+            rollback_sticker(
                 user_id
             )
 
             return
 
-        # ----------------------------------------------------
-        # FILE SIZE
-        # ----------------------------------------------------
+        file_size = (
+            media.file_size or 0
+        )
 
         if file_size > MAX_FILE_SIZE:
 
-            rollback_usage(
+            rollback_sticker(
                 user_id
             )
 
             await update.message.reply_text(
                 "❌ Fayl juda katta.\n\n"
-                f"📦 Maksimal: "
+                f"📦 Maksimal hajm: "
                 f"{MAX_FILE_MB} MB"
             )
 
@@ -898,34 +868,34 @@ async def handle_media(
             f"{unique}{extension}"
         )
 
-        output_extension = (
-            ".webm"
-            if source_type == "video"
-            else ".png"
-        )
+        if source_type == "video":
 
-        output_path = (
-            TEMP_DIR /
-            f"{unique}{output_extension}"
-        )
+            output_path = (
+                TEMP_DIR /
+                f"{unique}.webm"
+            )
+
+        else:
+
+            output_path = (
+                TEMP_DIR /
+                f"{unique}.png"
+            )
 
         user_sessions[user_id] = {
             "input": str(input_path),
-            "output": str(output_path)
+            "output": str(output_path),
+            "source_type": source_type
         }
 
         # ----------------------------------------------------
-        # STATUS
+        # DOWNLOAD
         # ----------------------------------------------------
 
         status = await update.message.reply_text(
             "⏳ <b>Fayl yuklanmoqda...</b>",
             parse_mode="HTML"
         )
-
-        # ----------------------------------------------------
-        # DOWNLOAD
-        # ----------------------------------------------------
 
         telegram_file = await media.get_file()
 
@@ -934,7 +904,7 @@ async def handle_media(
         )
 
         # ----------------------------------------------------
-        # PROCESS
+        # STATIC
         # ----------------------------------------------------
 
         if source_type == "static":
@@ -945,98 +915,64 @@ async def handle_media(
             )
 
             await asyncio.to_thread(
-                make_png,
+                convert_photo,
                 input_path,
                 output_path
             )
 
-            sticker_format = "static"
-
-        else:
-
-            keyboard = [
-                [
-                    "🟢 Yashil",
-                    "⚪ Oq"
-                ],
-                [
-                    "⚫ Qora",
-                    "🔵 Ko'k"
-                ],
-                [
-                    "❌ Fonsiz"
-                ]
-            ]
-
-            # Sessionga processing holatini yozamiz
-            user_sessions[user_id][
-                "status_message_id"
-            ] = status.message_id
-
-            await status.edit_text(
-                "🎨 <b>Fon rangini tanlang:</b>\n\n"
-                "🟢 Yashil\n"
-                "⚪ Oq\n"
-                "⚫ Qora\n"
-                "🔵 Ko'k\n"
-                "❌ Fonsiz — chromakey ishlatilmaydi",
-                parse_mode="HTML"
+            await send_sticker(
+                update,
+                context,
+                output_path,
+                "static"
             )
-
-            user_sessions[user_id][
-                "waiting_color"
-            ] = True
 
             return
 
         # ----------------------------------------------------
-        # SEND STATIC
+        # VIDEO
         # ----------------------------------------------------
 
-        await send_sticker(
-            update,
-            context,
-            output_path,
-            sticker_format,
-            remaining
+        await status.edit_text(
+            "🎨 <b>Fon rangini tanlang:</b>\n\n"
+            "🟢 Yashil\n"
+            "⚪ Oq\n"
+            "⚫ Qora\n"
+            "🔵 Ko'k\n"
+            "❌ Fonsiz",
+            parse_mode="HTML"
         )
+
+        user_sessions[user_id][
+            "waiting_color"
+        ] = True
 
     except Exception:
 
         logger.exception(
-            "Media processing failed"
+            "Media error"
         )
 
-        rollback_usage(
+        rollback_sticker(
             user_id
         )
 
         await update.message.reply_text(
             "❌ <b>Xatolik yuz berdi.</b>\n\n"
-            "Faylni qayta yuborib ko'ring.",
+            "Qayta urinib ko'ring.",
             parse_mode="HTML"
         )
 
-    finally:
-
-        # video color selectionda session kerak
-        if (
-            user_id not in user_sessions
-            or not user_sessions[user_id].get(
-                "waiting_color"
-            )
-        ):
-
-            cleanup_session(
-                user_id
-            )
+        cleanup_session(
+            user_id
+        )
 
 
 # ============================================================
-# COLOR TEXT
+# COLOR PROCESSING
 # ============================================================
 
-async def handle_color_selection(
+async def process_color(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -1062,25 +998,29 @@ async def handle_color_selection(
         or ""
     )
 
-    color_map = {
+    colors = {
 
-        "🟢 Yashil": "#00FF00",
+        "🟢 Yashil":
+            "#00FF00",
 
-        "⚪ Oq": "#FFFFFF",
+        "⚪ Oq":
+            "#FFFFFF",
 
-        "⚫ Qora": "#000000",
+        "⚫ Qora":
+            "#000000",
 
-        "🔵 Ko'k": "#0000FF",
+        "🔵 Ko'k":
+            "#0000FF",
 
     }
 
     if text == "❌ Fonsiz":
 
-        color = None
+        selected_color = None
 
-    elif text in color_map:
+    elif text in colors:
 
-        color = color_map[text]
+        selected_color = colors[text]
 
     else:
 
@@ -1096,25 +1036,25 @@ async def handle_color_selection(
 
     try:
 
-        status = await update.message.reply_text(
-            "⚙️ <b>Transparent sticker tayyorlanmoqda...</b>",
+        await update.message.reply_text(
+            "⚙️ <b>Transparent WEBM tayyorlanmoqda...</b>",
             parse_mode="HTML"
         )
 
-        if color:
+        if selected_color:
 
             await asyncio.to_thread(
-                make_transparent_webm,
+                convert_chromakey,
                 input_path,
                 output_path,
-                color,
-                "0.25"
+                selected_color,
+                0.25
             )
 
         else:
 
             await asyncio.to_thread(
-                make_webm,
+                convert_video,
                 input_path,
                 output_path
             )
@@ -1127,18 +1067,10 @@ async def handle_color_selection(
             update,
             context,
             output_path,
-            "video",
-            (
-                None
-                if is_admin(user_id)
-                else (
-                    DAILY_LIMIT
-                    - get_usage(user_id)
-                )
-            )
+            "video"
         )
 
-        await status.delete()
+        return True
 
     except Exception:
 
@@ -1146,7 +1078,7 @@ async def handle_color_selection(
             "Color processing error"
         )
 
-        rollback_usage(
+        rollback_sticker(
             user_id
         )
 
@@ -1155,25 +1087,24 @@ async def handle_color_selection(
             parse_mode="HTML"
         )
 
+        return True
+
     finally:
 
         cleanup_session(
             user_id
         )
 
-    return True
-
 
 # ============================================================
-# SEND / ADD STICKER
+# SEND STICKER
 # ============================================================
 
 async def send_sticker(
     update,
     context,
     output_path,
-    sticker_format,
-    remaining
+    sticker_format
 ):
 
     user = update.effective_user
@@ -1187,9 +1118,9 @@ async def send_sticker(
 
     emoji_list = ["😀"]
 
-    # --------------------------------------------------------
+    # ========================================================
     # EXISTING PACK
-    # --------------------------------------------------------
+    # ========================================================
 
     if pack:
 
@@ -1200,7 +1131,7 @@ async def send_sticker(
                 "rb"
             ) as sticker_file:
 
-                input_sticker = InputSticker(
+                sticker = InputSticker(
                     sticker=sticker_file,
                     emoji_list=emoji_list
                 )
@@ -1208,7 +1139,7 @@ async def send_sticker(
                 await context.bot.add_sticker_to_set(
                     user_id=user_id,
                     name=pack["pack_name"],
-                    sticker=input_sticker
+                    sticker=sticker
                 )
 
             pack_name = pack[
@@ -1217,29 +1148,21 @@ async def send_sticker(
 
         except TelegramError as error:
 
-            logger.warning(
-                "Could not add to existing pack: %s",
-                error
+            logger.exception(
+                "Could not add sticker to pack"
             )
 
-            # Telegram error sababini foydalanuvchiga
-            # ko'rsatamiz, yangi packni ko'r-ko'rona
-            # yaratmaymiz.
-
-            await update.message.reply_text(
-                "❌ Mavjud sticker packga qo'shib bo'lmadi.\n\n"
-                f"{error}"
+            raise RuntimeError(
+                f"Telegram pack error: {error}"
             )
 
-            raise
-
-    # --------------------------------------------------------
-    # NEW PACK
-    # --------------------------------------------------------
+    # ========================================================
+    # CREATE NEW PACK
+    # ========================================================
 
     else:
 
-        pack_name = create_pack_name(
+        pack_name = generate_pack_name(
             user_id,
             sticker_format
         )
@@ -1254,7 +1177,7 @@ async def send_sticker(
             "rb"
         ) as sticker_file:
 
-            input_sticker = InputSticker(
+            sticker = InputSticker(
                 sticker=sticker_file,
                 emoji_list=emoji_list
             )
@@ -1263,9 +1186,7 @@ async def send_sticker(
                 user_id=user_id,
                 name=pack_name,
                 title=pack_title,
-                stickers=[
-                    input_sticker
-                ],
+                stickers=[sticker],
                 sticker_format=sticker_format
             )
 
@@ -1276,9 +1197,9 @@ async def send_sticker(
             sticker_format
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # RESULT
-    # --------------------------------------------------------
+    # ========================================================
 
     if is_admin(user_id):
 
@@ -1288,20 +1209,20 @@ async def send_sticker(
 
     else:
 
-        remaining_now = (
-            DAILY_LIMIT
-            - get_usage(user_id)
+        remaining = max(
+            0,
+            DAILY_LIMIT -
+            get_today_usage(user_id)
         )
 
         limit_text = (
             f"📊 Bugun qolgan: "
-            f"{remaining_now} ta"
+            f"{remaining} ta"
         )
 
     await update.message.reply_text(
-        "✅ <b>Sticker tayyor!</b>\n\n"
-        f"🔗 "
-        f"https://t.me/addstickers/"
+        "✅ <b>Sticker muvaffaqiyatli yaratildi!</b>\n\n"
+        f"🔗 https://t.me/addstickers/"
         f"{pack_name}\n\n"
         f"{limit_text}",
         parse_mode="HTML",
@@ -1322,14 +1243,13 @@ async def mypacks(
 
     register_user(user)
 
-    conn = db()
+    conn = get_db()
 
     rows = conn.execute("""
         SELECT
             pack_name,
             pack_title,
-            sticker_format,
-            created_at
+            sticker_format
 
         FROM packs
 
@@ -1345,13 +1265,13 @@ async def mypacks(
     if not rows:
 
         await update.message.reply_text(
-            "📦 Sizda hali pack yo'q."
+            "📦 Sizda hali sticker pack yo'q."
         )
 
         return
 
     lines = [
-        "🎨 <b>Sizning packlaringiz:</b>",
+        "🎨 <b>SIZNING PACKLARINGIZ</b>",
         ""
     ]
 
@@ -1360,8 +1280,14 @@ async def mypacks(
         start=1
     ):
 
+        icon = (
+            "🎬"
+            if row["sticker_format"] == "video"
+            else "🖼"
+        )
+
         lines.append(
-            f"{index}. "
+            f"{index}. {icon} "
             f"<a href=\"https://t.me/addstickers/"
             f"{row['pack_name']}\">"
             f"{row['pack_title']}"
@@ -1389,12 +1315,12 @@ async def stats(
     if not is_admin(user.id):
 
         await update.message.reply_text(
-            "⛔ Faqat admin uchun."
+            "⛔ Bu buyruq faqat admin uchun."
         )
 
         return
 
-    conn = db()
+    conn = get_db()
 
     total_users = conn.execute("""
         SELECT COUNT(*)
@@ -1403,21 +1329,21 @@ async def stats(
 
     active_today = conn.execute("""
         SELECT COUNT(*)
-        FROM usage
+        FROM daily_usage
 
         WHERE usage_date = ?
-        AND count > 0
+        AND sticker_count > 0
     """, (
         today(),
     )).fetchone()[0]
 
-    stickers_today = conn.execute("""
+    today_stickers = conn.execute("""
         SELECT COALESCE(
-            SUM(count),
+            SUM(sticker_count),
             0
         )
 
-        FROM usage
+        FROM daily_usage
 
         WHERE usage_date = ?
     """, (
@@ -1426,11 +1352,11 @@ async def stats(
 
     total_stickers = conn.execute("""
         SELECT COALESCE(
-            SUM(count),
+            SUM(sticker_count),
             0
         )
 
-        FROM usage
+        FROM daily_usage
     """).fetchone()[0]
 
     total_packs = conn.execute("""
@@ -1441,26 +1367,19 @@ async def stats(
     conn.close()
 
     await update.message.reply_text(
-        "📊 <b>BOT STATISTIKASI</b>\n\n"
-
-        f"👥 Jami userlar: "
+        "📊 <b>MOTIONLAB STATISTIKA</b>\n\n"
+        f"👥 Jami foydalanuvchilar: "
         f"<b>{total_users}</b>\n"
-
         f"🟢 Bugun faol: "
         f"<b>{active_today}</b>\n"
-
-        f"🎨 Bugun sticker: "
-        f"<b>{stickers_today}</b>\n"
-
-        f"🎨 Jami sticker: "
+        f"🎨 Bugun stickerlar: "
+        f"<b>{today_stickers}</b>\n"
+        f"🎨 Jami stickerlar: "
         f"<b>{total_stickers}</b>\n"
-
-        f"📦 Jami pack: "
+        f"📦 Jami packlar: "
         f"<b>{total_packs}</b>\n\n"
-
-        f"👑 Admin: Unlimited\n"
-        f"👤 User limit: "
-        f"{DAILY_LIMIT}/kun",
+        "👑 Admin: ♾️ Unlimited\n"
+        f"👤 User limit: {DAILY_LIMIT}/kun",
         parse_mode="HTML"
     )
 
@@ -1484,14 +1403,13 @@ async def users_command(
 
         return
 
-    conn = db()
+    conn = get_db()
 
     rows = conn.execute("""
         SELECT
             user_id,
             username,
-            first_name,
-            last_name
+            first_name
 
         FROM users
 
@@ -1555,24 +1473,21 @@ async def buy(
     if is_admin(user.id):
 
         await update.message.reply_text(
-            "👑 Siz adminsiz.\n\n"
-            "♾️ Limit: Unlimited"
+            "👑 Siz admin hisoblanasiz.\n\n"
+            "♾️ Siz uchun limit cheksiz."
         )
 
         return
 
     await update.message.reply_text(
         "💎 <b>TARIFLAR</b>\n\n"
-
         "🆓 FREE\n"
         f"• {DAILY_LIMIT} sticker / kun\n\n"
-
         "💎 PREMIUM\n"
-        "• Yuqori kunlik limit\n"
+        "• Yuqori limit\n"
         "• Premium funksiyalar\n"
         "• Ko'proq imkoniyatlar\n\n"
-
-        "🚧 Premium payment tizimi keyingi bosqichda.",
+        "🚧 Premium tizimi tez orada.",
         parse_mode="HTML"
     )
 
@@ -1586,7 +1501,8 @@ async def text_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    handled = await handle_color_selection(
+    # First check whether this is a color selection
+    handled = await process_color(
         update,
         context
     )
@@ -1651,7 +1567,7 @@ def health_server():
                 self.end_headers()
 
                 self.wfile.write(
-                    b"OK"
+                    b"MotionLab Bot is running"
                 )
 
             def log_message(
@@ -1674,7 +1590,7 @@ def health_server():
         )
 
         logger.info(
-            "Health server: %s",
+            "Health server started on %s",
             port
         )
 
@@ -1683,7 +1599,7 @@ def health_server():
     except Exception:
 
         logger.exception(
-            "Health server error"
+            "Health server failed"
         )
 
 
@@ -1696,76 +1612,74 @@ def main():
     if not TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN topilmadi."
+            "BOT_TOKEN environment variable topilmadi."
         )
 
     if ADMIN_ID == 0:
 
         raise RuntimeError(
-            "ADMIN_ID topilmadi."
+            "ADMIN_ID environment variable topilmadi."
         )
 
     init_db()
 
-    app = (
+    application = (
         ApplicationBuilder()
         .token(TOKEN)
-
         .connect_timeout(30)
         .read_timeout(60)
         .write_timeout(60)
         .pool_timeout(30)
-
         .build()
     )
 
-    # COMMANDS
+    # Commands
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "buy",
             buy
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "limit",
             limit_command
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "mypacks",
             mypacks
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "stats",
             stats
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "users",
             users_command
         )
     )
 
-    # MEDIA
+    # Media
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.VIDEO |
             filters.ANIMATION |
@@ -1774,17 +1688,17 @@ def main():
         )
     )
 
-    # CALLBACK
+    # Callback
 
-    app.add_handler(
+    application.add_handler(
         CallbackQueryHandler(
             button_click
         )
     )
 
-    # TEXT
+    # Text
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.TEXT &
             ~filters.COMMAND,
@@ -1793,24 +1707,45 @@ def main():
     )
 
     logger.info(
-        "BOT STARTING..."
+        "MotionLab Bot is starting..."
     )
 
-    app.run_polling(
+    # ========================================================
+    # IMPORTANT
+    # ========================================================
+    #
+    # DO NOT use:
+    #
+    # asyncio.run(...)
+    # asyncio.get_event_loop()
+    # loop.run_until_complete(...)
+    #
+    # run_polling() manages the event loop itself.
+    #
+
+    application.run_polling(
         drop_pending_updates=True
     )
 
 
 # ============================================================
-# ENTRY
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
 
-    threading.Thread(
-        target=health_server,
-        daemon=True
-    ).start()
+    try:
+
+        threading.Thread(
+            target=health_server,
+            daemon=True
+        ).start()
+
+    except Exception:
+
+        logger.exception(
+            "Health server thread failed"
+        )
 
     try:
 
@@ -1819,5 +1754,11 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         logger.info(
-            "BOT STOPPED"
+            "MotionLab Bot stopped."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "MotionLab Bot crashed."
 )
