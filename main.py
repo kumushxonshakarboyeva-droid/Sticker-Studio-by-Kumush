@@ -1,10 +1,16 @@
+import os
+import gc
+
+# RAM sarfini kamaytirish uchun muhit o'zgaruvchilari
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import static_ffmpeg
 static_ffmpeg.add_paths()
 
-import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-import os
 import re
 import json
 import subprocess
@@ -14,6 +20,7 @@ import asyncio
 from datetime import datetime
 
 from PIL import Image
+import onnxruntime as ort
 from rembg import remove, new_session
 from aiohttp import web
 
@@ -36,6 +43,23 @@ USAGE_FILE = "user_usage.json"
 DAILY_LIMIT = 3
 
 user_sessions = {}
+
+# Rembg sessiyasini xavfsiz yuklash
+def get_rembg_session():
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+    return new_session("u2netp", providers=['CPUExecutionProvider'], sess_options=opts)
+
+logger.info("Rembg modeli yuklanmoqda...")
+try:
+    REMBG_SESSION = get_rembg_session()
+    logger.info("Rembg modeli muvaffaqiyatli yuklandi!")
+except Exception as e:
+    logger.error(f"Rembg modelini yuklashda xatolik: {e}")
+    REMBG_SESSION = None
 
 # ---------- JSON Database Helpers ----------
 def load_json(filepath):
@@ -286,11 +310,15 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_text = "100x100 Emoji" if pack.get('type') == 'custom_emoji' else "512x512 Stiker"
         await query.edit_message_text(f"To'plam: {pack['title']} ({size_text})\n\n2️⃣ Endi menga rasm yoki video yuboring.")
 
-# ---------- REMBG va Stiker Tayyorlash ----------
+# ---------- Optimizatsiya qilingan REMBG va Stiker Tayyorlash ----------
 def process_image_rembg(input_path: str, output_path: str, target_size: int):
-    input_img = Image.open(input_path)
-    session_rembg = new_session("u2netp")
-    output_img = remove(input_img, session=session_rembg)
+    input_img = Image.open(input_path).convert("RGBA")
+    input_img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    
+    if REMBG_SESSION is None:
+        raise Exception("Rembg sessiyasi yuklanmagan!")
+        
+    output_img = remove(input_img, session=REMBG_SESSION)
 
     w, h = output_img.size
     if w > h:
@@ -300,23 +328,27 @@ def process_image_rembg(input_path: str, output_path: str, target_size: int):
         new_h = target_size
         new_w = int(w * (target_size / h))
 
-    resized_img = output_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    resized_img = output_img.resize((max(1, new_w), max(1, new_h)), Image.Resampling.LANCZOS)
     canvas = Image.new("RGBA", (target_size, target_size), (0, 0, 0, 0))
     canvas.paste(resized_img, ((target_size - new_w) // 2, (target_size - new_h) // 2), resized_img)
     canvas.save(output_path, "PNG")
 
 def convert_video_to_webm(input_path: str, output_path: str, target_size: int):
     bitrate = "128k" if target_size == 100 else "256k"
-    vf = f"scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+    vf = f"fps=15,scale={target_size}:{target_size}:force_original_aspect_ratio=decrease,pad={target_size}:{target_size}:(ow-iw)/2:(oh-ih)/2:color=black@0"
     ffmpeg_cmd = [
         "ffmpeg", "-y", "-ss", "0", "-t", "3", "-i", input_path,
         "-vf", vf, "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-threads", "1",
         "-auto-alt-ref", "0", "-b:v", bitrate, output_path
     ]
     subprocess.run(ffmpeg_cmd, check=True)
 
 async def process_and_add_directly(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     session = user_sessions.get(user_id)
+    if not session:
+        return
+
     input_path = session['input_path']
     media_type = session['media_type']
     pack_type = session.get('pack_type', 'regular')
@@ -382,6 +414,7 @@ async def process_and_add_directly(update: Update, context: ContextTypes.DEFAULT
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         cleanup_session(user_id)
+        gc.collect()
 
 def cleanup_session(user_id):
     if user_id in user_sessions:
