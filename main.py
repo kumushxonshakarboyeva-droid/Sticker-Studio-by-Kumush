@@ -156,7 +156,9 @@ async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     free_left = max(0, 3 - free_used)
 
     text = (
-        f"📊 Sizning balansingiz:
+        res_text = f"""📊 Sizning balansingiz: {used}/{DAILY_LIMIT} ta ishlatildi (Qolgan: {remaining} ta).
+
+🔗 To'plam: https://t.me/addstickers/{pack_name}"""
 "
         f"• Bugungi bepul limit: {free_left}/3 ta
 "
